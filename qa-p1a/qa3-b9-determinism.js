@@ -113,16 +113,20 @@ console.log('\n=== QA3-B2. 3 次运行到 3 个不同目录（固定 --now）===
 
 console.log('\n=== QA3-B3. 与工程师报告 §13.7 的声称值对比 ===');
 {
-  // ★ UPSTREAM-FIX-1 基线更新（改测试要被看见）★
-  //   旧声称值（53b15863…/00edebd7…）对应修复前的 IR：修复后 design_ir 的
-  //   _comment/_layerFieldNote.merged 文案更新、无切片文档告警语义变化，
-  //   IR 产物内容随之合法变更 —— md5 基线同步刷新，并保留新旧对照以供溯源。
+  // ★ UPSTREAM-FIX-1 / FIX-3 / FIX-4 基线更新（改测试要被看见）★
+  //   - FIX-1（前一轮）：IR 告警语义两档化 → IR 文案变更；
+  //   - FIX-3（本轮）：IR 图层新增 suspectedMerged 字段 → design_ir md5 变更；
+  //   - FIX-4（本轮）：merged 启发式不再禁用 L1/L2、未命中去向保守化 →
+  //     change_plan 的 diffs 分布变化 → change_plan md5 变更。
+  //   以上均为**预期的行为变更**，基线同步刷新并保留旧值溯源。
   //   确定性本身（3 次运行逐字节一致）由 QA3-B2 独立保证，不受基线刷新影响。
+  //   历史基线：初版 A=53b15863… B=00edebd7…（FIX-1 前）；
+  //             FIX-1 后 A=fd741acb8af4273c8b802bd60bbab7a8 B=6b2a80d34243050c02b7029b11dcbdf2；
+  //             change_plan 初版=27279d2fad69ad1274bf86c58ff091f3（FIX-4 前）。
   const CLAIMED = {
-    // 旧基线（UPSTREAM-FIX-1 之前）：A=53b15863e7346df11d2d5ee5050ae880 B=00edebd75e10406166757fc9364fa9cb
-    'design_ir.A.json': 'fd741acb8af4273c8b802bd60bbab7a8',
-    'design_ir.B.json': '6b2a80d34243050c02b7029b11dcbdf2',
-    'change_plan.json': '27279d2fad69ad1274bf86c58ff091f3',
+    'design_ir.A.json': '3d3cb03cf530a0d7056d5428a7f9c246',
+    'design_ir.B.json': '341d4c816c53e59609e9f4dea98e9279',
+    'change_plan.json': '4dc16c597b35252b70e4434c9183fd5c',
     'map.json': '83c8ef6a4827076dffa3dbc5d94a2f32',
   };
   for (const [name, want] of Object.entries(CLAIMED)) {

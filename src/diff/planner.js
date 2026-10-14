@@ -238,8 +238,8 @@ function buildChangePlan(args) {
   };
   // ★ 统计口径 ★
   //   直接从最终 diffs 反算：confidence 恰等于 mergedConfidenceCap 的条目数。
-  //   （含配对与 REMOVE 路径的封顶，QA 独立验证时修的口径）。
-
+  //   UPSTREAM-FIX-4 后这些条目只可能是：L3 弱证据命中疑似合并对象、
+  //   疑似合并组内的 REMOVE（L1/L2 精确匹配不再封顶）。
   const cap = cfg.diff && cfg.diff.mergedConfidenceCap !== undefined
     ? cfg.diff.mergedConfidenceCap : 0.5;
   summary.mergedConfidenceCapped = sortedDiffs

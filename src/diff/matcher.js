@@ -11,10 +11,28 @@
  * | L3 | pHash + 尺寸 + 位置 | 名字被合并/改了就靠这个兜底 |
  * | L4 | 均不命中 | 判 `INFERRED`，进人工确认队列，**默认 skip 而非猜测** |
  *
- * ★ merged 组的三条硬规则（ARCHITECTURE §4.6 / PRD K4）★
- *   1. merged=true 的组内节点只允许 L3 匹配，不允许 L1/L2。
- *   2. 命中后 confidence 强制封顶 0.5。
- *   3. 匹配失败一律 L4 -> INFERRED，defaultIfUnconfirmed='skip'。
+ * ★ merged/suspected 启发式的联动语义（★ UPSTREAM-FIX-4：成本不对称重构 ★）★
+ *
+ *   旧行为（已废除）：merged=true 的组内节点**预先禁用** L1/L2、只允许 L3
+ *   且封顶 0.5。外部审查指出这会误伤：画师可能给弹窗建了切片但没给按钮组
+ *   建切片，「文档有切片 + 某组无切片」并不证明该组被合并 —— 误判会**无理
+ *   放弃正常独立组的精确匹配**（高代价）。
+ *
+ *   成本不对称：
+ *     · 误判 merged 的代价：精确匹配被禁用 -> 人工确认增加（高）。
+ *     · 漏判 merged 的代价：真被合并的组在第二份 PSD 里根本没有独立子层，
+ *       L1（要求双侧 slice 名一致）/L2（要求双侧归一名全等）本来就会失败，
+ *       自然落入 L3/未命中（低）。
+ *
+ *   新语义：
+ *     1. merged/suspected 状态**不改变匹配路径**：组内图层照常走 L1/L2/L3
+ *        全部档位 —— 匹配成功（尤其 L1 slice 名一致 / L2 归一名全等）本身
+ *        就证明没被合并，精确结果优先。
+ *     2. 只影响**未命中去向**：未匹配且位于 merged/suspected 组内的图层
+ *        进 INFERRED（留人工确认）而非 ADD；REMOVE 侧同样压置信度
+ *        （classifier.js 职责）。
+ *     3. L3（视觉相似，弱证据）命中且疑似合并时 confidence 封顶 0.5 ——
+ *        疑似合并的对象可能只是「碰巧长得像」扁平内容，弱证据需打折。
  *
  * ★ UPSTREAM-FIX-3：身份加作用域（跨 PSD 节点 ID 碰撞）★
  *   base 与 target 的图层 id 各自从 L001 独立编号，**必然碰撞**。
@@ -232,6 +250,10 @@ function matchLayers(args) {
   /**
    * 尝试配对。
    *
+   * ★ UPSTREAM-FIX-4：封顶只作用于 L3 ★
+   *   merged/suspected 不再禁用 L1/L2、也不对精确匹配封顶 —— 匹配成功
+   *   本身就是「没被合并」的证据。只有 L3（视觉相似弱证据）命中且任一侧
+   *   疑似合并时才封顶（疑似合并的对象可能只是碰巧长得像扁平内容）。
    *
    * @param {Object} base
    * @param {Object} target
@@ -243,7 +265,7 @@ function matchLayers(args) {
   const take = (base, target, level, confidence, evidence, extra) => {
     const suspect = underMerged.get(`base:${base.id}`) || underMerged.get(`target:${target.id}`);
     let conf = confidence;
-    if (suspect) conf = Math.min(conf, mergedCap);
+    if (suspect && level === LEVEL.L3) conf = Math.min(conf, mergedCap);
     pairs.push({
       baseId: base.id,
       targetId: target.id,
@@ -259,6 +281,8 @@ function matchLayers(args) {
   const claimable = (l) => l.type !== 'group';
 
   // ================= L1：slice 名完全一致 =================
+  // ★ UPSTREAM-FIX-4：merged/suspected 组内节点照常参与 L1 ——
+  //   双侧 slice 名一致是最强证据，命中即证明未合并
   const bySlice = new Map();
   for (const t of args.targetLayers) {
     if (!claimable(t) || !t.sliceName) continue;
@@ -267,7 +291,6 @@ function matchLayers(args) {
   }
   for (const b of args.baseLayers) {
     if (!claimable(b) || !b.sliceName) continue;
-    if (underMerged.get('base:' + b.id)) continue;
     const cands = bySlice.get(b.sliceName) || [];
     const hit = cands.find((t) => !usedTarget.has(t.id));
     if (!hit) continue;
@@ -291,7 +314,6 @@ function matchLayers(args) {
   for (const b of args.baseLayers) {
     if (!claimable(b) || !b.normName) continue;
     if (usedTarget.size && pairs.some((p) => p.baseId === b.id)) continue;
-    if (underMerged.get('base:' + b.id)) continue;
     const cands = (byNorm.get(b.normName) || []).filter((t) => !usedTarget.has(t.id));
     if (!cands.length) continue;
     // 同名多候选：优先尺寸吻合的；仍多个则取 id 最小的（确定性），并降置信度 + 标 AMBIGUOUS
@@ -349,9 +371,9 @@ function matchLayers(args) {
       + `位置 (${cp.b.bbox.x},${cp.b.bbox.y}) vs (${cp.t.bbox.x},${cp.t.bbox.y})，`
       + `加权相似度 ${cp.sim.score}`
       + (suspect
-        ? `；该层位于 merged 组『${findMergedGroupName(cp.b, baseById)
+        ? `；该层疑似位于合并组『${findMergedGroupName(cp.b, baseById)
           || findMergedGroupName(cp.t, targetById)}』内，`
-          + `按规则置信度封顶 ${mergedCap}`
+          + `视觉相似属弱证据，置信度封顶 ${mergedCap}（UPSTREAM-FIX-4：精确匹配不受限，仅弱证据打折）`
         : ''),
       { sizeMatched: sameSize(cp.b.bbox, cp.t.bbox, sizeTol), posMatched: samePos(cp.b.bbox, cp.t.bbox, posTol), ...cp.sim.parts });
   }

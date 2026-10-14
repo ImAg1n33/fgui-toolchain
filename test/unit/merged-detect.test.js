@@ -11,14 +11,18 @@
  *
  * 修复后的两档语义：
  *   【强证据】docHasSlices=true（文档确实在用切片）+ 纯栅格无切片子树
- *     -> merged=true（触发 L3 封顶 / INFERRED 联动）
+ *     -> merged=true（启发式强判定，IR 字段 + MERGED 告警）
  *   【弱信号】docHasSlices=false + 同样形态
- *     -> merged=false + suspected=true（只发 info 级 SUSPECTED_MERGED_GROUP，
- *        不触发任何联动）
+ *     -> merged=false + suspected=true（info 级 SUSPECTED_MERGED_GROUP +
+ *        IR suspectedMerged 字段）
+ *
+ *   ★ 两档都是启发式信号，不改变匹配路径，仅影响未命中去向
+ *     （UPSTREAM-FIX-4：L1/L2 照常精确匹配且不封顶；未命中且疑似合并
+ *       进 INFERRED；仅 L3 弱证据命中疑似合并对象时封顶 0.5）
  *
  * 本文件同时锁定：
  *   · 文本层 / 智能对象 / 组内切片三种豁免在两档下行为不变（回归）；
- *   · suspected 不触发 matcher 置信度封顶与 classifier INFERRED 联动；
+ *   · 联动新语义（精确匹配不封顶 / 未命中去向保守化）；
  *   · 两条告警构造器的契约（MERGED vs SUSPECTED 的 lost_info 差异）。
  */
 
@@ -122,8 +126,8 @@ test('★ 弱信号: suspected 产出的是 SUSPECTED_MERGED_GROUP（info 级、
   assert.ok(w.msg.includes('不判定为合并组'), '文案必须明说「只是疑似」');
 });
 
-test('★ 联动隔离: 无切片文档 + 疑似组不触发 matcher 置信度封顶（L2 照常 0.95）', () => {
-  // IR 形态：组未标 merged（suspected 档在 IR 里就是 merged=false）
+test('★ 联动语义(UPSTREAM-FIX-4): 疑似组的 L2 精确匹配不封顶（匹配成功 = 未合并的证据）', () => {
+  // IR 形态：组为 suspected（merged=false, suspectedMerged=true）
   const base = [
     irLayer({ id: 'L001', type: 'group', name: '按钮组', childCount: 1, merged: false }),
     irLayer({ id: 'L002', name: '按钮背景', parent: 'L001', normName: '按钮背景',
@@ -138,20 +142,28 @@ test('★ 联动隔离: 无切片文档 + 疑似组不触发 matcher 置信度�
   assert.equal(r.pairs.length, 1, '疑似组内的子层应正常配对');
   assert.equal(r.pairs[0].level, 'L2');
   assert.ok(r.pairs[0].confidence > 0.5,
-    `★ suspected 不触发封顶：confidence 应 > 0.5，实得 ${r.pairs[0].confidence}`);
-  assert.equal(r.pairs[0].underMerged, false);
-  assert.equal(r.stats.mergedCapped, 0, '封顶统计必须为 0');
+    `★ L2 全等匹配是「未合并」的强证据，不得封顶：实得 ${r.pairs[0].confidence}`);
+  assert.equal(r.stats.mergedCapped, 0);
 });
 
-test('★ 联动隔离: 无切片文档 + 疑似组的未匹配子层判 ADD 而非 INFERRED', () => {
-  // 对照：underMerged=true 时 classifyUnmatchedTarget 判 INFERRED（matcher.test.js 已锁）；
-  // 这里锁 suspected 档（underMerged=false）不受牵连 —— 确定的新增照常判 ADD
-  const target = irLayer({ id: 'L002', name: '新图标', bbox: { x: 100, y: 100, w: 96, h: 96 } });
-  const d = classifyUnmatchedTarget(target, {
+test('★ 联动语义(UPSTREAM-FIX-4): 疑似组内未匹配子层进 INFERRED（保守去向），组外未匹配判 ADD', () => {
+  // 原语义（UPSTREAM-FIX-1 时点）：suspected 完全不触发任何联动，未匹配判 ADD。
+  // 新语义：成本不对称 —— 未匹配 + 疑似合并 = 不确定，宁可进人工确认
+  // （INFERRED），不猜一个确定的 ADD。组外未匹配仍是确定新增（ADD）。
+  const inSuspected = irLayer({ id: 'L002', name: '图层249', parent: 'L001',
+    bbox: { x: 100, y: 100, w: 96, h: 96 } });
+  const dIn = classifyUnmatchedTarget(inSuspected, {
+    cfg: {}, underMerged: true, groupName: '奖励组（疑似）', candidates: [],
+  });
+  assert.equal(dIn.op, OP.INFERRED, '★ 疑似组内未匹配必须进 INFERRED，不进 ADD');
+  assert.equal(dIn.defaultIfUnconfirmed, 'skip');
+
+  const standalone = irLayer({ id: 'L002', name: '新图标', bbox: { x: 100, y: 100, w: 96, h: 96 } });
+  const dOut = classifyUnmatchedTarget(standalone, {
     cfg: {}, underMerged: false, candidates: [],
   });
-  assert.equal(d.op, OP.ADD, '★ suspected 不得把确定新增拖进 INFERRED');
-  assert.ok(d.confidence >= 0.9);
+  assert.equal(dOut.op, OP.ADD, '不在 merged/suspected 组内的未匹配仍是确定新增');
+  assert.ok(dOut.confidence >= 0.9);
 });
 
 // ---------------------------------------------------------------- 豁免回归（两档一致）

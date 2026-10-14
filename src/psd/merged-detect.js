@@ -29,14 +29,21 @@
  *
  *   【弱信号 -> merged = false，suspected = true】文档没有切片
  *   （docHasSlices = false）时，同样形态只降级为「疑似合并」：
- *     - **不触发** planner / matcher 的 merged 联动（L3 封顶 / INFERRED），
- *       因为 IR 里不会标 merged = true；
- *     - 只在 IR warnings 里发一条 SUSPECTED_MERGED_GROUP 轻度提示（info 级）。
+ *     - IR 里不标 merged = true，只落 suspectedMerged = true，
+ *       并发一条 SUSPECTED_MERGED_GROUP 轻度提示（info 级）。
  *
- * merged=true 的图层在 R3 中的行为（架构 §4.6，仅强证据档生效）：
- *   - 允许 L3（pHash）尝试匹配，但 confidence 强制封顶 0.5
- *   - 匹配失败一律 L4 -> INFERRED，defaultIfUnconfirmed='skip'
- *   - 不进人工确认队列的**自动写入**路径
+ * ★ 启发式信号的下游语义（★ UPSTREAM-FIX-4：成本不对称重构 ★）★
+ *   merged / suspected 是**启发式信号，不改变匹配路径，仅影响未命中去向**：
+ *     - merged/suspected 组内图层照常走 L1/L2/L3 全部匹配档位 ——
+ *       匹配成功（尤其 L1 slice 名一致 / L2 归一名全等）本身就证明没被合并；
+ *       「merged: true 建议人工确认后仍不成立时才排除」。
+ *     - 未命中且位于 merged/suspected 组内的图层进 INFERRED（留人工确认）
+ *       而非 ADD；REMOVE 侧同样压置信度（classifier.js / planner.js 职责）。
+ *     - L3（视觉相似，弱证据）命中疑似合并对象时 confidence 封顶 0.5。
+ *   成本不对称依据：误判 merged 若禁用精确匹配，会无理放弃正常独立组的
+ *   L1/L2（高代价）；漏判时真合并组在第二份 PSD 里没有独立子层，L1/L2
+ *   本来就会失败、自然落入 L3/未命中（低代价）—— 所以宁可让启发式只做
+ *   保守的「去向修正」，不做激进的「路径封锁」。
  */
 
 /**

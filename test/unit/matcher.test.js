@@ -3,8 +3,9 @@
  * test/unit/matcher.test.js —— L1→L4 四级匹配 + 七类差异分类
  *
  * ★ 验收：L1 / L2 / L3 / L4 四条路径各有单测；
- *   merged=true 的组内节点 confidence 封顶 0.5；
- *   未能匹配的节点 100% 标 INFERRED 且 defaultIfUnconfirmed='skip'（PRD K4）
+ *   merged/suspected 启发式**不改变匹配路径**（UPSTREAM-FIX-4）：
+ *   L1/L2 照常精确匹配且不封顶，仅 L3 弱证据命中疑似合并对象时封顶 0.5，
+ *   未命中且疑似合并时进 INFERRED（classifier 侧，PRD K4）
  */
 
 const test = require('node:test');
@@ -43,6 +44,7 @@ function layer(o) {
     visible: o.visible === undefined ? true : o.visible,
     blend: 'normal',
     merged: !!o.merged,
+    suspectedMerged: !!o.suspectedMerged,
     childCount: o.childCount || 0,
     sliceName: o.sliceName || null,
     phash: o.phash || null,
@@ -148,9 +150,14 @@ test('l3Similarity: 同图自比分数为 1', () => {
 });
 
 // ======================================================================
-// ★ merged 组的硬规则
+// ★ merged/suspected 启发式联动（UPSTREAM-FIX-4 成本不对称语义）
 // ======================================================================
-test('★ merged 组内节点不走 L1/L2（只允许 L3）', () => {
+
+test('★ merged 组内节点照常走 L1/L2（原语义「禁用 L1/L2」已废除）', () => {
+  // 原语义 → 新语义：原来 merged 组内禁用 L1/L2、强制落到未匹配；
+  // 新语义下匹配成功（L1 slice 名一致）本身就证明没被合并 ——
+  // 误判 merged 禁用精确匹配的代价高（无理放弃精确结果），而漏判的代价低
+  // （真合并组没有独立子层，L1/L2 本来就会失败）。
   const base = [
     layer({ id: 'L001', name: '组合并组', type: 'group', merged: true, childCount: 2 }),
     layer({ id: 'L002', name: '矩形11', parent: 'L001', sliceName: 'mail_bg', normName: '矩形11',
@@ -162,12 +169,29 @@ test('★ merged 组内节点不走 L1/L2（只允许 L3）', () => {
       bbox: { x: 10, y: 10, w: 200, h: 100 } }),
   ];
   const r = matchLayers({ baseLayers: base, targetLayers: target, config: CFG });
-  // 因为子层在 merged 组内，L1/L2 被跳过 -> 两层都未匹配（组本身不参与配对）
-  assert.equal(r.pairs.length, 0, '★ merged 组内不应通过 L1/L2 配对');
-  assert.equal(r.unmatchedTarget.length, 1);
+  assert.equal(r.pairs.length, 1, '★ merged 组内子层应照常精确匹配');
+  assert.equal(r.pairs[0].level, LEVEL.L1);
+  assert.equal(r.pairs[0].confidence, 1, '★ L1 精确匹配不得被封顶');
 });
 
-test('★ merged 组内 L3 命中时 confidence 封顶 0.5', () => {
+test('★ merged/suspected 组内 L2 命中同样不封顶（匹配成功 = 未合并的证据）', () => {
+  const base = [
+    layer({ id: 'L001', name: '按钮组', type: 'group', suspectedMerged: true, childCount: 1 }),
+    layer({ id: 'L002', name: '按钮背景', parent: 'L001', normName: '按钮背景',
+      bbox: { x: 10, y: 10, w: 200, h: 100 } }),
+  ];
+  const target = [
+    layer({ id: 'L001', name: '按钮组', type: 'group', suspectedMerged: true, childCount: 1 }),
+    layer({ id: 'L002', name: '按钮背景', parent: 'L001', normName: '按钮背景',
+      bbox: { x: 10, y: 10, w: 200, h: 100 } }),
+  ];
+  const r = matchLayers({ baseLayers: base, targetLayers: target, config: CFG });
+  assert.equal(r.pairs.length, 1);
+  assert.equal(r.pairs[0].level, LEVEL.L2);
+  assert.equal(r.pairs[0].confidence, 0.95, '★ L2 全等匹配不受 suspected 影响');
+});
+
+test('★ merged 组内 L3 命中时 confidence 封顶 0.5（弱证据打折，保留）', () => {
   const base = [
     layer({ id: 'L001', name: '组合并组', type: 'group', merged: true, childCount: 1 }),
     layer({ id: 'L002', name: '完全不同的名字', parent: 'L001', phash: '0000000074eef6fe',

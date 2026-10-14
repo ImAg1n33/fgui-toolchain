@@ -267,7 +267,7 @@ test('★ INFERRED 全部 defaultIfUnconfirmed=skip（PRD K4）', async (t) => {
   }
 });
 
-test('★ merged 组内节点的匹配置信度封顶 0.5（ARCHITECTURE §4.6）', async (t) => {
+test('★ merged 启发式：精确匹配不再受限，仅弱证据/未命中保守联动（UPSTREAM-FIX-3/4）', async (t) => {
   if (!ensureFixtures()) return t.skip('fixture 未生成');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-mg-'));
   try {
@@ -277,20 +277,20 @@ test('★ merged 组内节点的匹配置信度封顶 0.5（ARCHITECTURE §4.6�
     const irB = readJson(path.join(dir, 'design_ir.B.json'));
 
     /**
-     * 收集某份 IR 里位于 merged 组内的图层 id。
+     * 收集某份 IR 里位于 merged/suspected 组内的图层 id（按本侧父链爬升）。
      * @param {Object} ir
      * @returns {Set<string>}
      */
     const underMergedIn = (ir) => {
       const byId = new Map(ir.layers.map((l) => [l.id, l]));
-      const mergedGroups = new Set(ir.layers.filter((l) => l.merged).map((l) => l.id));
+      const flagged = new Set(ir.layers.filter((l) => l.merged || l.suspectedMerged).map((l) => l.id));
       const out = new Set();
       for (const l of ir.layers) {
         let cur = l;
         const seen = new Set();
         while (cur && cur.parent && !seen.has(cur.id)) {
           seen.add(cur.id);
-          if (mergedGroups.has(cur.parent)) { out.add(l.id); break; }
+          if (flagged.has(cur.parent)) { out.add(l.id); break; }
           cur = byId.get(cur.parent);
         }
       }
@@ -299,25 +299,33 @@ test('★ merged 组内节点的匹配置信度封顶 0.5（ARCHITECTURE §4.6�
 
     const underA = underMergedIn(irA);
     const underB = underMergedIn(irB);
-    let checked = 0;
+    const CAP = 0.5;
+    let checkedPrecise = 0; // L1/L2 精确匹配（不封顶）
+    let checkedWeak = 0;    // L3 / REMOVE（封顶）
 
     for (const d of plan.diffs) {
       // ★ 注意：两侧图层 id 会重复（L001/L002…），REMOVE 的 node 指的是**基准态**，
       //   其余 op 的 node 指的是**目标态**。查表必须选对一侧，否则会张冠李戴。
-      const ids = d.op === 'REMOVE' ? [underA.has(d.node)] : [underB.has(d.node)];
-      if (ids.some(Boolean)) {
-        assert.ok(d.confidence <= 0.5,
-          `★ merged 组内节点 ${d.op}/${d.slot}(${d.node}) 置信度应 <= 0.5，实得 ${d.confidence}`);
-        checked++;
+      const underTarget = d.op === 'REMOVE' ? false : underB.has(d.node);
+      const underBase = underA.has(d.baseNode || '') || (d.op === 'REMOVE' && underA.has(d.node));
+      if (!underTarget && !underBase) continue;
+
+      if (d.matchLevel === 'L1' || d.matchLevel === 'L2') {
+        // ★ UPSTREAM-FIX-4：精确匹配（slice 名一致 / 归一名全等）本身就是
+        //   「没被合并」的证据 —— 不得封顶，且应拿到各级正常置信度
+        assert.ok(d.confidence > CAP,
+          `★ 疑似合并组内的 L1/L2 精确匹配 ${d.op}/${d.slot}(${d.node}) 不应封顶，实得 ${d.confidence}`);
+        checkedPrecise++;
+      } else if (d.matchLevel === 'L3' || d.op === 'REMOVE') {
+        // L3 是视觉相似弱证据、REMOVE 是「疑似合并藏起来」的保守路径 → 封顶
+        assert.ok(d.confidence <= CAP,
+          `★ 疑似合并组内的 ${d.op}/${d.slot}(${d.node}) 置信度应 <= ${CAP}，实得 ${d.confidence}`);
+        checkedWeak++;
       }
-      // baseNode 侧的约束同样要查（RESIZE/REUSE 等配对类）
-      if (d.baseNode && underA.has(d.baseNode) && d.op !== 'REMOVE') {
-        assert.ok(d.confidence <= 0.5,
-          `★ merged 组内基准节点 ${d.op}/${d.slot}(base=${d.baseNode}) 置信度应 <= 0.5，实得 ${d.confidence}`);
-        checked++;
-      }
+      // INFERRED 的置信度上界由「INFERRED 全部 skip」用例覆盖（confidence=min(l4Confidence,cap)）
     }
-    assert.ok(checked > 0, '★ 至少应有一条 merged 组内的差异被检查到');
+    assert.ok(checkedPrecise > 0, '★ 黄金样本中应存在疑似合并组内的 L1/L2 精确匹配（旧语义下它们被禁用）');
+    assert.ok(checkedWeak > 0, '★ 黄金样本中应存在疑似合并组内的 L3/REMOVE 保守路径');
     assert.ok(plan.openQuestions.some((q) => q.includes('被合并')),
       '★ 合并组必须进人工确认队列（漏报 = 后面必猜错）');
   } finally {

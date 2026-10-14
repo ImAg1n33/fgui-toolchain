@@ -271,6 +271,7 @@ class IrBuilder {
           visible: layer.hidden !== true,
           blend: layer.blendMode || 'normal',
           merged: false,
+          suspectedMerged: false,
           childCount: 0,
           sliceName: null,
           text: null,
@@ -444,7 +445,10 @@ class IrBuilder {
         node.merged = true;
         warnings.push(buildMergedWarning(node, info));
       } else if (info.suspected) {
-        // 疑似档：不动 node.merged（保持 false），只发 info 级提示
+        // 疑似档：不动 node.merged（保持 false），落 suspectedMerged 标记 +
+        // info 级提示。UPSTREAM-FIX-4：该标记只影响未命中去向（planner 把
+        // suspected 组内未匹配图层送 INFERRED），不影响匹配路径。
+        node.suspectedMerged = true;
         warnings.push(buildSuspectedMergedWarning(node, info));
       }
     }
@@ -475,8 +479,10 @@ class IrBuilder {
         bboxSource: 'own = 图层自身坐标；derived = 子层并集推导（仅 group）',
         opacity: '0..1，定点化到 6 位',
         visible: 'false 表示画师隐藏了该层',
-        merged: 'true = 该组被画师合并，子层信息不可恢复（R2-F5；仅强证据档：'
-          + '文档有切片时才判，无切片文档的疑似组不标此字段）',
+        merged: 'true = 该组被画师合并（启发式强判定，R2-F5；仅强证据档：'
+          + '文档有切片时才判）。★ 启发式信号不改变匹配路径，仅影响未命中去向',
+        suspectedMerged: 'true = 疑似合并（无切片文档的弱信号档，SUSPECTED_MERGED_GROUP）；'
+          + '仅影响未命中去向（INFERRED），不影响匹配路径',
         childCount: '直接子层数',
         sliceName: '导出的切片名（L1 最强匹配通道的依据），无则 null',
         text: 'type=text 时为 {value,fontSize,color,align,font}；color 恒为 6 位 #RRGGBB',
