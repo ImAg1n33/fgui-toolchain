@@ -1,7 +1,8 @@
 # ---- 合规：素材是公司未公开美术资产，一律不入库（PRD K1 第④条）----
-assets/
-切图/
-slices/
+# 注意：必须锚定仓库根（前导 /），否则会误伤 src/assets/ 等同名源码目录！
+/assets/
+/切图/
+/slices/
 *.psd
 *.psb
 
@@ -39,5 +40,8 @@ Thumbs.db
 # ChatGPT 方案讨论原始记录（对话隐私）
 docs/chatgpt-session-raw.txt
 docs/chatgpt-session-dedup.txt
+# 内部过程文档（含合作方沟通语境，不入公开仓库）
+docs/QUESTIONS-FOR-FRIEND.md
+docs/DEV-PLAN.md
 # 空目录占位
 qa-orig/
