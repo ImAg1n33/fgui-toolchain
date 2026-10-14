@@ -231,7 +231,7 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 ## QA 独立验证（第二轮）
 
 QA 工程师用**不复用我任何测试与 fixture** 的 9 个独立脚本做了对抗性验证
-（`qa/`，报告见 `docs/QA-REPORT.md`），判定 IS_PASS: NO。修复后：
+（`qa/` 目录下 9 个独立脚本，全部可重复执行），判定 IS_PASS: NO。修复后：
 
 ```bash
 npm test        # 249 个自测用例（含 50 条新增回归）
@@ -308,8 +308,9 @@ P1（R4 XML 生成 + R5 现场验证包）本轮**不实现**——
 本机无 FairyGUI / Unity / C# 环境，写出的 XML 没有任何办法验证。
 `gen-xml` 命令会诚实上报未实现，并列出被小 Q 阻塞的 6 个问题（Q1~Q6）。
 
-详见 `docs/IMPLEMENTATION-REPORT.md`：实测结果、确定性 md5 证据、
-与架构文档的偏差、哪些验收项因缺真实素材无法验证。
+完整实测记录（确定性 md5 证据、与架构文档的偏差、哪些验收项因缺真实素材
+暂无法验证）见仓库内 `qa/`、`qa-round2/`、`qa-p1a/` 三个独立验证目录——
+每个脚本都可重复执行，结论以代码与脚本为准。
 
 ---
 
@@ -317,7 +318,7 @@ P1（R4 XML 生成 + R5 现场验证包）本轮**不实现**——
 
 - 本项目以 [MIT](LICENSE) 许可证开源。
 - 方案起点是对上游开源项目 [fgui-agent-bridge](https://github.com/2042player/fgui-agent-bridge)（MIT）的二次开发实践，
-  其踩坑清单整理见 `docs/UPSTREAM-README.md`；`docs/*.baseline` 为该上游源码的参考副本（MIT，版权归原作者）。
+  `docs/*.baseline` 为该上游源码的参考副本（MIT，版权归原作者）。
 - [FairyGUI](https://www.fairygui.com/) 及其编辑器的公开插件 API 是本工具链的操作对象；
   本项目与 FairyGUI 官方无关联。
 - 本仓库文档中的切图、PSD 与界面样本**全部为程序合成**（`npm run fixtures` 可重建），
