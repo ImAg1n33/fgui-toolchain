@@ -134,8 +134,64 @@ function pathFlavor(p) {
   if (/^[A-Za-z]:/.test(s)) return 'win';
   // UNC：\\server\share 或 //server/share
   if (/^[\\/]{2}[^\\/]/.test(s)) return 'win';
+  // POSIX 绝对
   if (s.startsWith('/')) return 'posix';
   return 'relative';
+}
+
+/**
+ * 路径的**书写形态**（含相对路径），供 basename / dirname 等字符串操作选规则集。
+ *
+ * 与 pathFlavor() 的区别：pathFlavor() 把相对路径视为形态中立（toPosixRel 需要
+ * 相对侧跟随绝对侧），而这里相对路径必须按自己的分隔符判定 —— 否则取 basename
+ * 时又要用宿主规则（第 2 层宿主化问题的根因）。
+ *
+ * @param {string} p
+ * @returns {'win'|'posix'}
+ */
+function pathShape(p) {
+  const f = pathFlavor(p);
+  if (f !== 'relative') return f;
+  const s = String(p === undefined || p === null ? '' : p);
+  if (s.includes('\\')) return 'win';
+  return 'posix'; // 含 '/' 或纯文件名：两种规则结果一致
+}
+
+/**
+ * 按形态选对应的路径规则集。
+ *
+ * ★ 全模块唯一允许「宿主无关地」使用路径字符串 API 的入口 ★
+ *   直接调 `path.basename/relative/...` 用的是**宿主 OS** 规则 —— 这正是
+ *   Ubuntu CI 两次失败的根因（第 1 层 relative、第 2 层 basename）。
+ *   形态相关的一切操作都必须经这里拿 win32/posix 规则集。
+ *
+ * @param {string} flavor 'win' | 'posix' | 'relative'
+ * @returns {Object} path.win32 或 path.posix
+ */
+function pathLibFor(flavor) {
+  return flavor === 'win' ? path.win32 : path.posix;
+}
+
+/**
+ * 形态无关的 basename（★ 第 2 层宿主化问题的修复点 ★）。
+ *
+ * 事故复盘：降级分支曾用宿主版 basename —— Windows 上
+ * `path.basename('C:\\Users\\x\\solid.psd')` = `solid.psd`（对），
+ * 而 Linux 上 `path.posix.basename` 不认反斜杠 → 整串原样返回 →
+ * 产物里出现 `outside-root/C:/Users/x/solid.psd`（绝对路径泄漏）。
+ * Windows 开发机测不出来，只有 Linux runner 会红。
+ *
+ * @param {string} p 任意形态的路径
+ * @returns {string} 文件名（POSIX 风格，不含盘符与分隔符残留）
+ */
+function basenameByShape(p) {
+  const lib = pathLibFor(pathShape(p));
+  const base = lib.basename(String(p));
+  // 双保险：即便上游传进奇怪形态，产物里也绝不留盘符/分隔符
+  return String(base)
+    .replace(/\\/g, '/')
+    .replace(/^[A-Za-z]:\/?/, '')
+    .replace(/[:\\]/g, '_');
 }
 
 /**
@@ -189,8 +245,9 @@ function toPosixRel(from, target) {
 
   // 形态中立（相对）跟随另一侧；两侧都相对则按 POSIX 规则
   const flavor = (fa === 'win' || ta === 'win') ? 'win' : 'posix';
+  const lib = pathLibFor(flavor);
   /** 统一分隔符到选定形态。 */
-  const norm = (x) => (flavor === 'win' ? String(x).replace(/\//g, '\\') : String(x).replace(/\\/g, '/'));
+  const norm = (x) => (lib === path.win32 ? String(x).replace(/\//g, '\\') : String(x).replace(/\\/g, '/'));
   const f = norm(from);
   const t = norm(target);
 
@@ -204,9 +261,9 @@ function toPosixRel(from, target) {
         + `from=${JSON.stringify(from)} target=${JSON.stringify(target)}。`
         + '跨盘符的相对路径不存在（path.win32 会返回绝对路径），把绝对路径写进产物是 B9 事故 —— 必须明确报错');
     }
-    rel = path.win32.relative(f, t);
+    rel = lib.relative(f, t);
   } else {
-    rel = path.posix.relative(f, t);
+    rel = lib.relative(f, t);
   }
 
   const out = String(rel).replace(/\\/g, '/');
@@ -250,6 +307,10 @@ function joinKey(...parts) {
 
 module.exports = {
   FLOAT_PRECISION,
+  pathFlavor,
+  pathShape,
+  pathLibFor,
+  basenameByShape,
   round6,
   roundDeep,
   sortKeysDeep,

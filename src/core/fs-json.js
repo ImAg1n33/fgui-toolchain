@@ -11,7 +11,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { sortKeysDeep, roundDeep, toPosixRel, toPosix } = require('./determinism');
+const {
+  sortKeysDeep, roundDeep, toPosixRel, toPosix, basenameByShape,
+} = require('./determinism');
 const { AppError, CODES } = require('./errors');
 const { atomicWrite } = require('./atomic');
 
@@ -91,7 +93,15 @@ function relativizePathValue(val, root) {
     return toPosixRel(root, val);
   } catch (err) {
     if (err && err.code === 'BAD_ARGUMENT') {
-      return `outside-root/${toPosix(path.basename(val))}`;
+      // ★ basename 也必须按形态取（第 2 层宿主化）：宿主版 basename 在 Linux 上
+      //   不认反斜杠，会把整串 Windows 路径当成文件名 → 产物里出现绝对路径。
+      const out = `outside-root/${basenameByShape(val)}`;
+      // ★ 机器化守卫：降级结果里绝不允许残留盘符或分隔符（任何宿主都成立）
+      if (/^[A-Za-z]:/.test(out) || out.includes('\\') || out.includes(':')) {
+        throw new AppError(CODES.BAD_ARGUMENT,
+          `降级后的路径仍含绝对路径信息（${out}）—— 绝不能写进产物（B9）：${JSON.stringify(val)}`);
+      }
+      return out;
     }
     throw err;
   }

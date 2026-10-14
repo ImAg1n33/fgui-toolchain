@@ -12,7 +12,7 @@ const os = require('os');
 const path = require('path');
 const { stringifyJson, writeJson, readJson } = require('../../src/core/fs-json');
 const {
-  round6, roundDeep, sortKeysDeep, sortBy, entriesSorted, toPosixRel,
+  round6, roundDeep, sortKeysDeep, sortBy, entriesSorted, toPosixRel, basenameByShape,
 } = require('../../src/core/determinism');
 const { atomicWrite, stampOf, rollbackFrom } = require('../../src/core/atomic');
 
@@ -157,6 +157,73 @@ test('★ writeJson 跨盘符降级: 相对路径不存在时写 outside-root/<�
   assert.ok(text.includes('outside-root/solid.psd'), `应降级为 outside-root/<文件名>：${text}`);
   assert.ok(!/[A-Za-z]:[\\/]/.test(text), `★ 产物内绝不允许出现绝对路径：${text}`);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ★★ 第 2 层宿主化（Ubuntu CI 第二轮失败）★★
+//   降级分支原来用宿主版 basename：Windows 上正确，Linux 上不认反斜杠 →
+//   整串 Windows 路径被当成文件名 → 产物里出现 `outside-root/C:/Users/...`。
+//   教训：**测试本身也会宿主化** —— 只断言具体字符串在 Windows 上永远绿，
+//   必须补「与宿主无关」的机器化守卫。
+
+test('★ 降级值不得残留盘符/分隔符（机器化守卫，任何宿主都成立）', () => {
+  const cases = [
+    ['D:\\UItool', 'C:\\Users\\someone\\solid.psd'],   // Windows 跨盘
+    ['D:\\UItool', '//srv/share/dir/solid.psd'],       // UNC（正斜杠写法）跨根
+    ['/repo', 'C:\\Users\\someone\\solid.psd'],        // POSIX 根 + Windows 路径（形态混用）
+  ];
+  for (const [root, val] of cases) {
+    const dir = tmpDir('det-guard');
+    const p = path.join(dir, 'o.json');
+    try {
+      writeJson(p, { source: { psdPath: val } }, { root });
+      const got = readJson(p).source.psdPath; // ★ 断言值本身（整个 JSON 文本当然含冒号）
+      assert.ok(!got.includes(':'), `★ 降级值不得含盘符冒号（${root} + ${val}）：${got}`);
+      assert.ok(!got.includes('\\'), `★ 降级值不得含反斜杠（${root} + ${val}）：${got}`);
+      assert.equal(got, 'outside-root/solid.psd',
+        `★ 任何形态都应取到文件名（${root} + ${val}）：${got}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('basenameByShape: 按输入形态取文件名（Windows / POSIX / UNC / 纯文件名）', () => {
+  assert.equal(basenameByShape('C:\\Users\\someone\\solid.psd'), 'solid.psd');
+  assert.equal(basenameByShape('C:/Users/someone/solid.psd'), 'solid.psd');
+  assert.equal(basenameByShape('/home/runner/work/solid.psd'), 'solid.psd');
+  assert.equal(basenameByShape('\\\\srv\\share\\dir\\solid.psd'), 'solid.psd');
+  assert.equal(basenameByShape('//srv/share/dir/solid.psd'), 'solid.psd');
+  assert.equal(basenameByShape('solid.psd'), 'solid.psd');
+  // ★ 与「用 POSIX 规则硬算」的结果不等 —— 把 Linux 上那条失败原样钉死
+  assert.notEqual(basenameByShape('C:\\Users\\someone\\solid.psd'),
+    path.posix.basename('C:\\Users\\someone\\solid.psd'),
+    '★ 用 POSIX 规则取 basename 会得到整串 Windows 路径（Ubuntu CI 事故）—— 必须按形态取');
+});
+
+test('★ 静态守卫: 确定性内核不得使用宿主相关的路径 API（形态敏感）', () => {
+  // ★★ 为什么需要静态扫描 ★★
+  //   宿主版 basename 在 Windows 上**恰好等于** win32 规则的结果，所以任何
+  //   行为断言在 Windows 上都抓不到这个变异 —— 只有 Linux runner 会红
+  //   （上轮正是靠 CI 才发现）。因此补一条**源码级**守卫：确定性内核
+  //   （determinism / fs-json，负责产物路径形态）不得直接调用宿主相关 API，
+  //   必须走 pathLibFor()/basenameByShape() 这类形态分派入口。
+  //   允许：path.win32.* / path.posix.*（显式规则集）、path.dirname（真实文件
+  //   系统的目录操作，宿主规则本就正确）。
+  const forbidden = /\bpath\.(basename|relative|isAbsolute|sep|delimiter|normalize)\b/;
+  const repoRoot = path.resolve(__dirname, '../..');
+  const files = ['src/core/determinism.js', 'src/core/fs-json.js'];
+  for (const rel of files) {
+    const full = path.join(repoRoot, rel);
+    const src = fs.readFileSync(full, 'utf8');
+    const lines = src.split(/\r?\n/);
+    const offenders = [];
+    lines.forEach((line, i) => {
+      const code = line.replace(/\/\/.*$/, '').replace(/^\s*\*.*$/, '');
+      if (forbidden.test(code)) offenders.push(`${rel}:${i + 1} ${line.trim()}`);
+    });
+    assert.equal(offenders.length, 0,
+      `★ ${rel} 不得使用宿主相关路径 API（形态敏感，会导致跨平台产物差异）：\n${offenders.join('\n')}`);
+  }
 });
 
 test('★ toPosixRel: 任何输入组合都不得泄漏绝对路径（机器化守卫）', () => {
