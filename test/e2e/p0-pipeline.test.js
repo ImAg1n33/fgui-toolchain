@@ -1,0 +1,586 @@
+'use strict';
+/**
+ * test/e2e/p0-pipeline.test.js —— P0 全链路端到端
+ *
+ * 跑通：合成切图 + 合成两份 PSD（状态 A / 状态 B，模拟邮件弹窗）
+ *   → assets.db + map.json + contact_sheet.html
+ *   → design_ir.{A,B}.json + ir_overlay.{A,B}.html
+ *   → change_plan.json + change_plan.md
+ *
+ * ★ 核心断言：
+ *   ① 全部产物生成且非空
+ *   ② **同一输入连跑 3 次，change_plan.json 与 design_ir.json 逐字节一致**（B9）
+ *   ③ 每个 JSON 产物带 _comment，每条 diff 有可读 evidence
+ *   ④ INFERRED 数量可控，且 defaultIfUnconfirmed 恒为 skip
+ *   ⑤ 产物内零时间戳、无绝对路径
+ */
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+
+const { runCli, runCliJson } = require('./run-cli');
+const { EXIT } = require('../../src/core/errors');
+const { makeAssets } = require('../fixtures/make-assets');
+const { makePsds } = require('../fixtures/make-psd');
+const { readJson } = require('../../src/core/fs-json');
+
+const ROOT = path.resolve(__dirname, '../..');
+const GOLDEN = path.join(ROOT, 'test/fixtures/golden');
+
+/**
+ * 跑一遍完整流水线到指定输出目录。
+ *
+ * ★ 用子进程调用 CLI ★（理由见 run-cli.js 顶部注释）：
+ *   既避免猴补 process.stdout.write 污染 node:test 报告，
+ *   也顺带验证了 bin 入口与退出码真的可用。
+ *
+ * @param {string} outDir
+ * @returns {Promise<{code:number, planCode:number, outputs:Object}>}
+ */
+async function runPipeline(outDir) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const assets = path.join(GOLDEN, 'assets');
+
+  const idx = runCliJson([
+    'asset-index', '--root', ROOT, '--assets', assets, '--out', outDir, '--run-id', 'e2e',
+  ]);
+  const irA = runCliJson([
+    'psd-ir', '--root', ROOT, '--psd', path.join(GOLDEN, 'state_A.psd'),
+    '--label', 'A', '--out', outDir,
+  ]);
+  const irB = runCliJson([
+    'psd-ir', '--root', ROOT, '--psd', path.join(GOLDEN, 'state_B.psd'),
+    '--label', 'B', '--out', outDir,
+  ]);
+  const plan = runCliJson([
+    'diff-plan', '--root', ROOT,
+    '--base', path.join(outDir, 'design_ir.A.json'),
+    '--target', path.join(outDir, 'design_ir.B.json'),
+    '--name', 'MailDetail', '--base-pkg', 'Mail', '--target-pkg', 'Mail',
+    '--assets', assets, '--out', outDir,
+  ]);
+
+  const codes = [idx.code, irA.code, irB.code, plan.code];
+  const bad = codes.find((c) => c !== EXIT.OK && c !== EXIT.NEEDS_HUMAN);
+  return {
+    code: bad === undefined ? EXIT.OK : bad,
+    planCode: plan.code,
+    outputs: { idx: idx.json, irA: irA.json, irB: irB.json, plan: plan.json },
+  };
+}
+
+/**
+ * 算文件 md5。
+ * @param {string} p
+ * @returns {string}
+ */
+function md5(p) {
+  return crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex');
+}
+
+/** 产物清单（run_meta 故意排除：B9 明确不比较它）。 */
+const ARTIFACTS = [
+  'design_ir.A.json', 'design_ir.B.json',
+  'change_plan.json', 'change_plan.md',
+  'map.json', 'contact_sheet.html',
+  'ir_overlay.A.html', 'ir_overlay.B.html',
+];
+
+// ---------------------------------------------------------------------
+// 准备 fixture（模块级，只做一次）
+// ---------------------------------------------------------------------
+let fixturesReady = false;
+function ensureFixtures() {
+  if (fixturesReady) return true;
+  if (!fs.existsSync(path.join(GOLDEN, 'assets')) || !fs.existsSync(path.join(GOLDEN, 'state_A.psd'))) {
+    return false;
+  }
+  fixturesReady = true;
+  return true;
+}
+
+test('e2e: fixture 已生成（若缺请先跑 npm run fixtures）', (t) => {
+  if (!ensureFixtures()) {
+    // 现场生成一次
+    makePsds({ outDir: GOLDEN });
+    makeAssets({ outDir: path.join(GOLDEN, 'assets') }).then(() => {
+      fixturesReady = true;
+    });
+  }
+  assert.ok(fs.existsSync(path.join(GOLDEN, 'state_A.psd')), 'state_A.psd 应存在');
+  assert.ok(fs.existsSync(path.join(GOLDEN, 'state_B.psd')), 'state_B.psd 应存在');
+  assert.ok(fs.existsSync(path.join(GOLDEN, 'assets')), '合成切图目录应存在');
+});
+
+test('★ e2e: 全链路跑通，全部产物生成且非空', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-e2e-'));
+  try {
+    const res = await runPipeline(dir);
+    assert.notEqual(res.code, EXIT.INTERNAL, `流水线不应异常退出（code=${res.code}）`);
+    assert.equal(res.code, EXIT.OK, `应返回 OK 或 NEEDS_HUMAN，实际 ${res.code}`);
+
+    for (const name of ARTIFACTS) {
+      const p = path.join(dir, name);
+      assert.ok(fs.existsSync(p), `★ 缺产物 ${name}`);
+      assert.ok(fs.statSync(p).size > 0, `产物 ${name} 不应为空`);
+    }
+    // assets.db 也应存在
+    assert.ok(fs.existsSync(path.join(dir, 'assets.db')), 'assets.db 应存在');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ B9: 同一输入连跑 3 次，产物逐字节一致（md5 对比）', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  // 三个独立输出目录，输入完全相同
+  const dirs = [];
+  const hashes = [];
+  try {
+    for (let i = 0; i < 3; i++) {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), `fgui-det-${i}-`));
+      dirs.push(d);
+      const res = await runPipeline(d);
+      assert.ok(res.code === EXIT.OK || res.code === EXIT.NEEDS_HUMAN,
+        `第 ${i + 1} 次运行退出码 ${res.code}`);
+      const h = {};
+      for (const name of ARTIFACTS) {
+        const p = path.join(d, name);
+        assert.ok(fs.existsSync(p), `第 ${i + 1} 次缺产物 ${name}`);
+        h[name] = md5(p);
+      }
+      hashes.push(h);
+    }
+
+    // ---- 逐字节对比 ----
+    const diffs = [];
+    for (const name of ARTIFACTS) {
+      const [a, b, c] = hashes.map((h) => h[name]);
+      if (a !== b || b !== c) {
+        diffs.push(`${name}: ${a} / ${b} / ${c}`);
+      }
+    }
+    assert.equal(diffs.length, 0,
+      `★ B9 失败：以下产物 3 次运行 md5 不一致：\n${diffs.join('\n')}`);
+
+    // ---- 打印证据（写进实现报告）----
+    process.stderr.write('\n[B9 确定性证据] 同一输入连跑 3 次，各产物 md5：\n');
+    for (const name of ARTIFACTS) {
+      process.stderr.write(`  ${name.padEnd(22)} ${hashes[0][name]}\n`);
+    }
+    process.stderr.write('  三次全部一致 ✅\n\n');
+  } finally {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('B9: 产物内零时间戳、零绝对路径', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-ts-'));
+  try {
+    await runPipeline(dir);
+    for (const name of ['design_ir.A.json', 'design_ir.B.json', 'change_plan.json', 'map.json', 'slot-map.json']) {
+      const p = path.join(dir, name);
+      if (!fs.existsSync(p)) continue;
+      const text = fs.readFileSync(p, 'utf8');
+      assert.ok(!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(text),
+        `★ ${name} 内不应有 ISO 时间戳`);
+      // Windows 绝对路径
+      assert.ok(!/[A-Za-z]:\\\\/.test(text) && !text.includes('D:\\'),
+        `★ ${name} 内不应有 Windows 绝对路径`);
+      // POSIX 绝对路径（根目录）
+      assert.ok(!/"[^"]*\/UItool\//.test(text), `★ ${name} 内不应有绝对路径`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ A10: 每个 JSON 产物带 _comment 与逐字段说明', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-cm-'));
+  try {
+    await runPipeline(dir);
+    for (const name of ['design_ir.A.json', 'design_ir.B.json', 'change_plan.json', 'map.json']) {
+      const obj = readJson(path.join(dir, name));
+      assert.ok(obj._comment, `★ ${name} 应有顶层 _comment`);
+      assert.ok(String(obj._comment).length > 20, `${name} 的 _comment 应写清含义`);
+    }
+    const ir = readJson(path.join(dir, 'design_ir.A.json'));
+    assert.ok(ir._bboxNote, 'IR 应有 _bboxNote 说明组 bbox 来源');
+    assert.ok(ir._layerFieldNote, 'IR 应有逐字段说明');
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    assert.ok(plan._fieldNote, 'ChangePlan 应有逐字段说明');
+    assert.ok(plan._opLabel, 'ChangePlan 应有 op 中文对照');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ 每条 diff 都有可读的 evidence（写清为什么这么判）', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-ev-'));
+  try {
+    await runPipeline(dir);
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    assert.ok(plan.diffs.length > 0, '应有差异条目');
+    for (const d of plan.diffs) {
+      assert.ok(typeof d.evidence === 'string' && d.evidence.length > 20,
+        `★ diff ${d.op}/${d.slot} 的 evidence 缺失或过短：${JSON.stringify(d.evidence)}`);
+      // evidence 应包含具体依据（尺寸/名字/slice/pHash 之一）
+      assert.ok(/(\d+x\d+|slice|归一名|pHash|汉明|merged|位置|尺寸|文本|颜色)/.test(d.evidence),
+        `diff ${d.op}/${d.slot} 的 evidence 未写清具体依据：${d.evidence}`);
+      assert.ok(d.slot, `diff ${d.op} 应有 slot`);
+      assert.ok(d.matchLevel, `diff ${d.op} 应有 matchLevel`);
+      assert.ok(typeof d.confidence === 'number', `diff ${d.op} 应有数值 confidence`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ INFERRED 全部 defaultIfUnconfirmed=skip（PRD K4）', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-inf-'));
+  try {
+    const res = await runPipeline(dir);
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    const inferred = plan.diffs.filter((d) => d.op === 'INFERRED');
+    for (const d of inferred) {
+      assert.equal(d.defaultIfUnconfirmed, 'skip',
+        `★ INFERRED 项 ${d.slot} 的默认动作必须是 skip（宁可少做，不要错做）`);
+      assert.ok(d.confidence <= 0.5, `INFERRED 置信度应 <= 0.5，实得 ${d.confidence}`);
+      assert.ok(d.evidence.includes('skip'), 'evidence 应写明「默认 skip」的理由');
+    }
+    // 有 INFERRED 时退出码必须是 NEEDS_HUMAN(4)
+    if (inferred.length > 0) {
+      assert.equal(res.planCode, EXIT.NEEDS_HUMAN,
+        '★ 存在未确认 INFERRED 时退出码应为 4（NEEDS_HUMAN）');
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ merged 组内节点的匹配置信度封顶 0.5（ARCHITECTURE §4.6）', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-mg-'));
+  try {
+    await runPipeline(dir);
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    const irA = readJson(path.join(dir, 'design_ir.A.json'));
+    const irB = readJson(path.join(dir, 'design_ir.B.json'));
+
+    /**
+     * 收集某份 IR 里位于 merged 组内的图层 id。
+     * @param {Object} ir
+     * @returns {Set<string>}
+     */
+    const underMergedIn = (ir) => {
+      const byId = new Map(ir.layers.map((l) => [l.id, l]));
+      const mergedGroups = new Set(ir.layers.filter((l) => l.merged).map((l) => l.id));
+      const out = new Set();
+      for (const l of ir.layers) {
+        let cur = l;
+        const seen = new Set();
+        while (cur && cur.parent && !seen.has(cur.id)) {
+          seen.add(cur.id);
+          if (mergedGroups.has(cur.parent)) { out.add(l.id); break; }
+          cur = byId.get(cur.parent);
+        }
+      }
+      return out;
+    };
+
+    const underA = underMergedIn(irA);
+    const underB = underMergedIn(irB);
+    let checked = 0;
+
+    for (const d of plan.diffs) {
+      // ★ 注意：两侧图层 id 会重复（L001/L002…），REMOVE 的 node 指的是**基准态**，
+      //   其余 op 的 node 指的是**目标态**。查表必须选对一侧，否则会张冠李戴。
+      const ids = d.op === 'REMOVE' ? [underA.has(d.node)] : [underB.has(d.node)];
+      if (ids.some(Boolean)) {
+        assert.ok(d.confidence <= 0.5,
+          `★ merged 组内节点 ${d.op}/${d.slot}(${d.node}) 置信度应 <= 0.5，实得 ${d.confidence}`);
+        checked++;
+      }
+      // baseNode 侧的约束同样要查（RESIZE/REUSE 等配对类）
+      if (d.baseNode && underA.has(d.baseNode) && d.op !== 'REMOVE') {
+        assert.ok(d.confidence <= 0.5,
+          `★ merged 组内基准节点 ${d.op}/${d.slot}(base=${d.baseNode}) 置信度应 <= 0.5，实得 ${d.confidence}`);
+        checked++;
+      }
+    }
+    assert.ok(checked > 0, '★ 至少应有一条 merged 组内的差异被检查到');
+    assert.ok(plan.openQuestions.some((q) => q.includes('被合并')),
+      '★ 合并组必须进人工确认队列（漏报 = 后面必猜错）');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ 差异类型覆盖：两态之间的增/删/改都被识别', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-cov-'));
+  try {
+    await runPipeline(dir);
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    // 合成样本刻意包含：L1 命中(REUSE 家族)、位置调整(MOVE)、尺寸调整(RESIZE)、新增(ADD/INFERRED)、移除(REMOVE)
+    const ops = new Set(plan.diffs.map((d) => d.op));
+    assert.ok(ops.has('RESIZE'), '应识别出尺寸调整（弹窗底框 480x320 -> 560x360）');
+    assert.ok(ops.has('MOVE') || ops.has('RESIZE'), '应识别出位置或尺寸变化');
+    assert.ok(ops.has('ADD') || ops.has('INFERRED'), '应识别出新增节点（奖励物品 / 领取按钮）');
+    // 四级匹配都应至少命中一级
+    assert.ok(plan.summary.byMatchLevel.L1 >= 1, 'L1（slice 名）通道应被使用');
+    assert.ok(plan.summary.byMatchLevel.L2 >= 1, 'L2（归一名）通道应被使用');
+    assert.ok(plan.summary.total > 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('产物: contact_sheet.html 内嵌全部缩略图且零外部引用', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-cs-'));
+  try {
+    await runPipeline(dir);
+    const html = fs.readFileSync(path.join(dir, 'contact_sheet.html'), 'utf8');
+    assert.ok(html.includes('data:image/png;base64,'), '★ 缩略图应内嵌为 data: URI');
+    // 零外部引用（K1 禁网）
+    assert.ok(!/<script[^>]+src=/.test(html), '★ 不得有外部 script');
+    assert.ok(!/<link[^>]+href=/.test(html), '★ 不得有外部 link');
+    assert.ok(!/https?:\/\//.test(html.replace(/xmlns="[^"]*"/g, '')),
+      '★ 产物 HTML 内不得出现任何 http(s) 引用');
+    assert.ok(html.includes('离线产物'), '应带离线声明');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('产物: ir_overlay.html 含 bbox 叠加与 merged 标注', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-ov-'));
+  try {
+    await runPipeline(dir);
+    const html = fs.readFileSync(path.join(dir, 'ir_overlay.B.html'), 'utf8');
+    assert.ok(html.includes('<svg'), '应有 SVG 叠加层');
+    assert.ok(html.includes('<rect'), '应有 bbox 矩形');
+    assert.ok(html.includes('MERGED'), '★ 合并组应在校验图上标出');
+    assert.ok(html.includes('data:image/png;base64,'), '应有内联合成图底图');
+    assert.ok(!/https?:\/\/(?!www\.w3\.org)/.test(html), '除 SVG 命名空间外不应有外部引用');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('产物: change_plan.md 是人可读的中文清单', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-md-'));
+  try {
+    await runPipeline(dir);
+    const md = fs.readFileSync(path.join(dir, 'change_plan.md'), 'utf8');
+    assert.ok(md.includes('差异分析结果'));
+    assert.ok(md.includes('汇总'));
+    assert.ok(md.includes('逐条差异'));
+    assert.ok(/判定依据/.test(md), '每条差异应写明判定依据');
+    assert.ok(md.includes('INFERRED'), '应列出 INFERRED 及其处理');
+    assert.ok(md.includes('需要确认的问题') || md.includes('openQuestions'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: --help 输出离线声明与命令表，退出码为 0', () => {
+  const res = runCli(['--help']);
+  assert.equal(res.code, EXIT.OK, '★ 显式 --help 应返回 0');
+  assert.ok(res.stderr.includes('不联网'), '★ CLI 必须显式打印「本工具不联网」声明（PRD K1）');
+  for (const cmd of ['asset-index', 'asset-search', 'psd-ir', 'diff-plan', 'selftest', 'gen-xml']) {
+    assert.ok(res.stderr.includes(cmd), `帮助应列出 ${cmd}`);
+  }
+});
+
+test('CLI: 无参数返回 USAGE(2)（区分「求助」与「误用」）', () => {
+  assert.equal(runCli([]).code, EXIT.USAGE);
+});
+
+test('CLI: 未知命令返回 USAGE(2)', () => {
+  const res = runCli(['不存在的命令']);
+  assert.equal(res.code, EXIT.USAGE);
+  assert.ok(res.stderr.includes('未知命令'));
+});
+
+test('★ CLI: 日志走 stderr、产物走 stdout（ARCHITECTURE §8.2）', (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-stream-'));
+  try {
+    const res = runCli([
+      'asset-index', '--root', ROOT, '--assets', path.join(GOLDEN, 'assets'),
+      '--out', dir, '--run-id', 'stream',
+    ]);
+    assert.equal(res.code, EXIT.OK);
+    // stdout 必须是干净 JSON —— 能直接 `> report.json`
+    assert.doesNotThrow(() => JSON.parse(res.stdout),
+      '★ stdout 必须是纯 JSON，不应混入日志');
+    // 日志与离线声明在 stderr
+    assert.ok(res.stderr.includes('不联网') || res.stderr.includes('离线'), '离线声明应走 stderr');
+    assert.ok(/\[\d{4}-\d{2}-\d{2}T/.test(res.stderr), '结构化日志应带 ISO 时间戳且走 stderr');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: gen-xml 诚实上报「未实现 + 缺什么」', () => {
+  const res = runCliJson(['gen-xml']);
+  assert.equal(res.json.implemented, false);
+  assert.equal(res.json.status, 'P1_STUB');
+  assert.ok(res.json.blockedBy.length >= 5, '应列出被小 Q 阻塞的问题');
+  assert.ok(res.json.upstreamPitfalls.length >= 5, '应复述上游踩坑清单');
+  assert.equal(res.code, EXIT.USAGE);
+});
+
+test('CLI: psd-ir 支持多份一次解析（R2-F7）', (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-multi-'));
+  try {
+    const res = runCliJson([
+      'psd-ir', '--root', ROOT,
+      '--psd', path.join(GOLDEN, 'state_A.psd'),
+      '--psd', path.join(GOLDEN, 'state_B.psd'),
+      '--out', dir,
+    ]);
+    assert.equal(res.code, EXIT.OK);
+    assert.ok(fs.existsSync(path.join(dir, 'design_ir.A.json')));
+    assert.ok(fs.existsSync(path.join(dir, 'design_ir.B.json')));
+    assert.equal(res.json.results.length, 2);
+    assert.deepEqual(res.json.results.map((r) => r.label), ['A', 'B']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: asset-search 支持人工确认写缓存（R1-F6 / A4）', (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-srch-'));
+  const common = [
+    '--root', ROOT, '--db', path.join(dir, 'assets.db'),
+    '--assets', path.join(GOLDEN, 'assets'), '--out', dir,
+  ];
+  try {
+    // 先建索引
+    assert.equal(runCli(['asset-index', '--root', ROOT,
+      '--assets', path.join(GOLDEN, 'assets'), '--out', dir, '--run-id', 'srch']).code, EXIT.OK);
+
+    // 检索拿到 assetId（带图层尺寸，走 Ch-1 精确同名 + ±2px 尺寸校验）
+    const found = runCliJson(['asset-search', ...common,
+      '--query', '矩形11', '--w', '180', '--h', '90']);
+    assert.equal(found.code, EXIT.OK);
+    assert.ok(found.json.hits.length >= 1);
+    assert.equal(found.json.certainty, 'exact_name', '★ 归一名全等 + 尺寸符应判「同名确定」');
+    assert.equal(found.json.needsConfirm, false);
+
+    // 人工确认写缓存
+    const cf = runCliJson(['asset-search', ...common,
+      '--slot', 'popup_bg', '--confirm', found.json.hits[0].assetId, '--by', 'xiaq']);
+    assert.equal(cf.code, EXIT.OK);
+    assert.ok(fs.existsSync(path.join(dir, 'slot-map.json')), '应生成 slot-map.json');
+
+    // 再查同一槽位 -> 命中缓存且零重算（A4）
+    const again = runCliJson(['asset-search', ...common, '--slot', 'popup_bg', '--query', '矩形11']);
+    assert.equal(again.json.zeroRecompute, true, '★ 二次运行应命中缓存且零重算');
+    assert.equal(again.json.certainty, 'confirmed_by_human');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ CLI: diff-plan 有未确认 INFERRED 时退出码为 4（NEEDS_HUMAN）', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-code-'));
+  try {
+    const res = await runPipeline(dir);
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    const inferred = plan.diffs.filter((d) => d.op === 'INFERRED');
+    // 产物已生成（不因「需人工确认」而不产出）
+    assert.ok(fs.existsSync(path.join(dir, 'change_plan.json')));
+    if (inferred.length > 0) {
+      assert.equal(res.planCode, EXIT.NEEDS_HUMAN,
+        '★ 存在未确认 INFERRED 时进程退出码应为 4，让脚本能自动判断能否进 P1');
+    } else {
+      assert.equal(res.planCode, EXIT.OK);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ======================================================================
+// ★ `--now` 曾是空壳 flag（QA 发现）—— 现在必须真正生效
+// ======================================================================
+test('★ --now 注入真实生效（run_meta.json 的 generatedAt 可复现）', (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const assets = path.join(GOLDEN, 'assets');
+  const withNow = (dir, iso) => {
+    runCli(['asset-index', '--root', ROOT, '--assets', assets, '--out', dir,
+      '--run-id', 'now', '--now', iso]);
+    return JSON.parse(fs.readFileSync(path.join(dir, 'run_meta.json'), 'utf8'));
+  };
+  const d1 = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-now1-'));
+  const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-now2-'));
+  try {
+    const a = withNow(d1, '2020-01-02T03:04:05.678Z');
+    const b = withNow(d2, '2031-11-12T13:14:15.999Z');
+    assert.equal(a.generatedAt, '2020-01-02T03:04:05.678Z',
+      `★ --now 未生效，generatedAt=${a.generatedAt}`);
+    assert.equal(b.generatedAt, '2031-11-12T13:14:15.999Z',
+      `★ --now 未生效，generatedAt=${b.generatedAt}`);
+    assert.notEqual(a.generatedAt, b.generatedAt);
+  } finally {
+    fs.rmSync(d1, { recursive: true, force: true });
+    fs.rmSync(d2, { recursive: true, force: true });
+  }
+});
+
+test('★ --now 非法值应报错（不静默回退到真实时间）', (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-badnow-'));
+  try {
+    const res = runCli(['asset-index', '--root', ROOT,
+      '--assets', path.join(GOLDEN, 'assets'), '--out', dir, '--now', '不是时间']);
+    assert.notEqual(res.code, 0, '非法 --now 必须返回非零退出码');
+    assert.ok(res.stderr.includes('now') || res.stderr.includes('时间'),
+      '错误信息应点明是 --now 的问题');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ --now 缺失时 run_meta 仍有真实时间（向后兼容）', (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-nonow-'));
+  try {
+    runCli(['asset-index', '--root', ROOT, '--assets', path.join(GOLDEN, 'assets'),
+      '--out', dir, '--run-id', 'nonow']);
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run_meta.json'), 'utf8'));
+    assert.match(meta.generatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+      '不传 --now 时应记录真实时间');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ npm test 入口本身可用（BUG#6：目录参数写法会让 Node v24 报 2 个失败）', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const script = pkg.scripts.test;
+  assert.ok(script.includes('--test'), 'test 脚本应调用 node --test');
+  // ★ 必须是 glob 而不是目录参数：Node v24 把目录当 2 个测试项 -> fail 2
+  assert.ok(!/\s--test\s+test\/unit\s/.test(script),
+    `★ test 脚本不能直接用目录参数（Node v24 会报 2 个失败）：${script}`);
+  assert.ok(/["']test\/\*\*\/\*\.test\.js["']/.test(script),
+    `test 脚本应使用 glob：${script}`);
+});

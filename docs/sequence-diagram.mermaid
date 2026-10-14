@@ -1,0 +1,133 @@
+%% FGUI 工具链 · 程序调用流程（P0 离线闭环）
+%% 对应 docs/ARCHITECTURE.md §4
+
+%% ---------- 场景 1：主闭环 切图+PSD → change_plan.json（纯离线，可单测） ----------
+sequenceDiagram
+    autonumber
+    actor Dev as 开发者/小Q
+    participant CLI as fgui-rb CLI
+    participant AI as AssetIndexer
+    participant DEC as ImageDecoder
+    participant FE as FeatureExtractor
+    participant G9 as Grid9
+    participant ST as AssetStore(node:sqlite)
+    participant PR as PsdReader
+    participant SH as CanvasShim
+    participant IB as IrBuilder
+    participant OV as Overlay(SVG HTML)
+    participant NM as NameNormalizer
+    participant SR as AssetSearch
+    participant MC as MapCache
+    participant MT as ChangeMatcher
+    participant DC as DiffClassifier
+    participant SA as StructureAdvisor
+    participant CP as ChangePlanner
+
+    rect rgb(238,246,255)
+    Note over Dev,CP: 阶段一 建索引（R1）
+    Dev->>CLI: asset-index --root <切图目录> --db assets.db
+    CLI->>AI: scan({root, extensions})
+    AI->>DEC: dimensions(f) / rawRgba(f)
+    AI->>FE: extract(raw)
+    FE-->>AI: AssetFeatures{alphaBox,phash,主色,边缘密度}
+    FE->>G9: computeGrid9(features)
+    G9-->>AI: Grid9Verdict{CAN_9GRID/SINGLE_AXIS_ONLY/NEVER, suggestedGrid}
+    AI->>ST: upsert(row)
+    AI-->>CLI: IndexReport{新增/变更/跳过}
+    CLI-->>Dev: 落盘 assets.db + 进度
+    end
+
+    rect rgb(240,255,240)
+    Note over Dev,CP: 阶段二 解析 PSD（R2）
+    Dev->>CLI: psd-ir --psd state_A.psd --psd state_B.psd
+    CLI->>SH: install()
+    Note over SH: 注入最小 2D context 垫片<br/>使 ag-psd 无需原生 canvas
+    CLI->>PR: read(file, {skipCompositeImageData:false})
+    PR->>SH: createImageData(w,h)
+    SH-->>PR: ImageData 壳
+    PR-->>CLI: psd(layers[], imageData 合成图)
+    CLI->>IB: build(psd)
+    IB->>IB: 展平 + 计算绝对 bbox
+    IB->>IB: 组 bbox = 子层 bbox 并集<br/>(ag-psd 的组自身 bbox 不可信)
+    IB->>IB: childCount>0 且无可展开子层 → merged:true
+    IB-->>CLI: DesignIr{layers[], warnings[]}
+    CLI->>OV: render(ir, compositePng)
+    OV-->>Dev: design_ir.json + ir_overlay.html
+    end
+
+    rect rgb(255,250,235)
+    Note over Dev,CP: 阶段三 差异分析（R3）
+    Dev->>CLI: diff-plan --ir-a A.json --ir-b B.json
+    CLI->>MC: load(map.json)
+    MC-->>CLI: MapEntry[]（人工确认过的槽位）
+    CLI->>MT: match(irA.layers, irB.layers)
+    MT->>NM: normalize(layer.name)
+    NM-->>MT: normName（去 (1)/全半角/大小写/空格/繁简）
+    MT->>MT: L1 slice.name 全等
+    MT->>MT: L2 归一名全等（禁止子串匹配）
+    MT->>MT: L3 pHash 64bit + 宽高比硬过滤
+    MT->>SR: 未命中层 → 三通道检索切图
+    SR->>ST: byNormName / allBySize
+    SR-->>MT: SearchHit[]{ch1,ch2,ch3,score}
+    MT->>MT: L4 兜底 → INFERRED, default=skip
+    MT-->>CLI: MatchPair[]
+    CLI->>DC: classify(pairs)
+    DC-->>CLI: PlanDiff[]{REUSE/MOVE/RESIZE/RESTYLE/ADD/REMOVE/INFERRED}
+    CLI->>SA: detectLists / detectReuse / detectDualState
+    SA-->>CLI: 结构建议（GList / 子组件 / 双态按钮）
+    CLI->>CP: plan(diffs, advice, questions)
+    CP-->>Dev: change_plan.json（人可读可改）+ open_questions
+    end
+
+    rect rgb(245,240,255)
+    Note over Dev,CP: 阶段四 二次运行（A4 零重算）
+    Dev->>CLI: asset-search --slot popup_bg --db assets.db --map map.json
+    CLI->>MC: lookup("popup_bg")
+    alt 命中且指纹未失效
+        MC-->>CLI: MapEntry → 直接返回，零特征重算
+    else 未命中
+        CLI->>SR: search({queryName, layerBox})
+        SR-->>CLI: Top-K 候选（带置信度）
+        CLI-->>Dev: contact_sheet.html 供人工点选
+    end
+    end
+
+%% ---------- 场景 2：事务化写盘（P1，编辑器关闭状态） ----------
+sequenceDiagram
+    autonumber
+    actor Dev as 开发者/小Q
+    participant CLI as fgui-rb gen-xml
+    participant PL as ChangePlan
+    participant LR as LintRules
+    participant TX as FsTransaction
+    participant FS as 文件系统
+    participant ED as FairyGUI 编辑器
+
+    Note over Dev,ED: 前置：编辑器必须已关闭（PRD §5.3 硬约束）
+    Dev->>CLI: gen-xml --plan change_plan.json --target <fgui工程>
+    CLI->>PL: 读取并校验 INFERRED 是否已全部处置
+    alt 存在未确认 INFERRED
+        PL-->>CLI: 阻断，退出码 4（NEEDS_HUMAN）
+    else 全部已确认/已 skip
+        PL-->>CLI: 通过
+    end
+    CLI->>LR: lintComponentXml(xml)
+    LR-->>CLI: LintProblem[]{error:0}
+    CLI->>TX: commit({targetPath, content, validator})
+    TX->>FS: 写 <target>.tmp
+    TX->>LR: 复检 tmp 内容（防写入截断）
+    LR-->>TX: 0 error
+    alt 目标文件已存在
+        TX->>FS: 复制 <target> → <target>.bak.<ts>
+        Note over TX,FS: ts 由 --now 注入<br/>保证测试可确定
+    end
+    TX->>FS: rename(tmp → target) 原子替换
+    alt 任一步失败
+        TX->>FS: 用 .bak 恢复
+        TX-->>CLI: {applied:false} 退出码 5（ROLLED_BACK）
+    else 成功
+        TX-->>CLI: {applied:true, backupPath}
+    end
+    CLI-->>Dev: reload_hint「请重启编辑器并 refresh」
+    Dev->>ED: 重启 → refresh → read_component 抽查
+    Note over Dev,ED: 如需回滚：fgui-rb rollback --to <ts>

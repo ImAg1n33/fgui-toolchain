@@ -1,0 +1,221 @@
+%% FGUI 工具链 · 数据结构与接口类图
+%% 对应 docs/ARCHITECTURE.md §3；实现见 docs/types.js
+
+classDiagram
+    direction LR
+
+    %% ---------- 核心值对象 ----------
+    class AssetRow {
+        +string id
+        +string relPath
+        +string baseName
+        +string normName
+        +string format
+        +number w
+        +number h
+        +number fileSize
+        +number mtimeMs
+        +string contentSha256
+        +AssetFeatures features
+        +Grid9Verdict grid9
+        +string suggestedName
+    }
+
+    class AssetFeatures {
+        +number w
+        +number h
+        +number alphaRatio
+        +Rect alphaBox
+        +string phash
+        +number dominantR
+        +number dominantG
+        +number dominantB
+        +number edgeDensity
+        +number cornerSolidity
+        +number midRowVariance
+        +number midColVariance
+        +number radialSymmetry
+        +number aspectRatio
+    }
+
+    class Rect {
+        +number x
+        +number y
+        +number w
+        +number h
+    }
+
+    class Grid9Verdict {
+        +string verdict
+        +number confidence
+        +string[] evidence
+        +string suggestedGrid
+    }
+
+    class SearchHit {
+        +AssetRow asset
+        +number score
+        +string level
+        +number ch1
+        +number ch2
+        +number ch3
+        +string evidence
+        +boolean confirmed
+    }
+
+    class MapEntry {
+        +string slot
+        +string assetId
+        +string fingerprint
+        +string confirmedBy
+        +string confirmedAt
+    }
+
+    %% ---------- R1 ----------
+    class NameNormalizer {
+        +normalize(raw, opts) string
+        +expandVariants(norm) string[]
+    }
+
+    class FeatureExtractor {
+        +decode(file) RawImage
+        +extract(raw) AssetFeatures
+        +computeGrid9(f) Grid9Verdict
+    }
+
+    class ImageDecoder {
+        +dimensions(file) Rect
+        +rawRgba(file) RawImage
+        +thumbnailDataUri(file, size) string
+    }
+
+    class AssetStore {
+        +open(opts) AssetStore
+        +upsert(row) void
+        +byNormName(norm) AssetRow[]
+        +allBySize(w, h) AssetRow[]
+        +close() void
+    }
+
+    class AssetIndexer {
+        +scan(opts) IndexReport
+        +incremental() IndexReport
+        +featuresOf(row) AssetFeatures
+    }
+
+    class AssetSearch {
+        +search(query) SearchHit[]
+        +channel1(q) SearchHit[]
+        +channel2(q) SearchHit[]
+        +channel3(q) SearchHit[]
+        +score(h) number
+    }
+
+    class MapCache {
+        +load(file) MapEntry[]
+        +put(entry) void
+        +lookup(slot) MapEntry
+        +isStale(entry) boolean
+    }
+
+    %% ---------- R2 ----------
+    class CanvasShim {
+        +install() void
+    }
+
+    class PsdReader {
+        +read(file, opts) Psd
+        +absoluteLayers(psd) FlatLayer[]
+    }
+
+    class IrBuilder {
+        +build(psd, meta) DesignIr
+        +markMerged(layers) IrWarning[]
+        +deriveGroupBox(layers) Rect
+    }
+
+    class TextExtractor {
+        +extract(layer) LayerText
+    }
+
+    class SliceExtractor {
+        +extract(psd) SliceRef[]
+    }
+
+    %% ---------- R3 ----------
+    class ChangeMatcher {
+        +match(base, target) MatchPair[]
+        +level1(pairs) void
+        +level2(pairs) void
+        +level3(pairs) void
+        +level4(pairs) void
+    }
+
+    class DiffClassifier {
+        +classify(pairs) PlanDiff[]
+        +summary(diffs) object
+    }
+
+    class StructureAdvisor {
+        +detectLists(diffs) ListAdvice[]
+        +detectReuse(diffs) ReuseAdvice[]
+        +detectDualState(diffs) DualStateAdvice[]
+    }
+
+    class ChangePlanner {
+        +plan(args) ChangePlan
+        +emitQuestions(plan) string[]
+    }
+
+    %% ---------- R4 / P1 ----------
+    class FsTransaction {
+        +commit() CommitResult
+        +rollback() RollbackResult
+    }
+
+    class LintRules {
+        +lintComponentXml(xml, opts) LintProblem[]
+        +checkColor(v) LintProblem[]
+        +checkTag(v) LintProblem[]
+        +checkScale9(v) LintProblem[]
+    }
+
+    class BridgeClient {
+        +probe() ProbeReport
+        +ping() object
+        +readComponent(pkg, name) object
+    }
+
+    %% ---------- 关系 ----------
+    NameNormalizer ..> AssetRow : 产出 normName
+    ImageDecoder ..> AssetFeatures : 提供像素
+    FeatureExtractor *-- ImageDecoder
+    FeatureExtractor ..> Grid9Verdict : 产出
+    AssetStore o-- AssetRow : 持久化
+    AssetIndexer ..> AssetStore : 写入
+    AssetIndexer *-- FeatureExtractor
+    AssetSearch *-- NameNormalizer
+    AssetSearch ..> AssetStore : 查询
+    AssetSearch ..> SearchHit : 产出
+    MapCache ..> SearchHit : confirmed 来源
+    MapCache o-- MapEntry
+
+    PsdReader *-- CanvasShim : 需要
+    PsdReader ..> IrBuilder : 原始图层
+    IrBuilder *-- TextExtractor
+    IrBuilder *-- SliceExtractor
+    IrBuilder ..> DesignIr : 产出
+    AssetSearch --> DesignIr : 用图层名检索切图
+
+    ChangeMatcher ..> ChangePlan : 输入
+    ChangeMatcher ..> AssetSearch : L3 兜底
+    DiffClassifier *-- ChangeMatcher
+    StructureAdvisor *-- DiffClassifier
+    ChangePlanner *-- StructureAdvisor
+    ChangePlanner ..> ChangePlan : 产出
+
+    FsTransaction ..> LintRules : 写盘前校验
+    LintRules ..> LintProblem : 产出
+    FsTransaction ..> DesignIr : 无关（P1）
+    ChangePlan --> FsTransaction : P1 输入
+    BridgeClient ..> LintRules : 现场复检

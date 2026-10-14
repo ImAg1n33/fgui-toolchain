@@ -1,0 +1,43 @@
+# ---- 合规：素材是公司未公开美术资产，一律不入库（PRD K1 第④条）----
+assets/
+切图/
+slices/
+*.psd
+*.psb
+
+# ---- 生成产物 ----
+out/
+*.db
+*.db-journal
+map.json
+run_meta.json
+design_ir*.json
+change_plan.json
+contact_sheet.html
+ir_overlay*.html
+contact-sheet.json
+
+# ---- 黄金样本：由 `npm run fixtures` 重建，不入库 ----
+test/fixtures/golden/
+
+# ---- 备份文件（事务写盘产物）----
+*.bak
+*.bak.*
+*.tmp
+
+# ---- Node / 编辑器 ----
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ---- 隐私与内部上下文（不入库）----
+# .workbuddy 为 AI 协作工作区记忆，含项目内部上下文
+.workbuddy/
+# ChatGPT 方案讨论原始记录（对话隐私）
+docs/chatgpt-session-raw.txt
+docs/chatgpt-session-dedup.txt
+# 空目录占位
+qa-orig/

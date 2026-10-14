@@ -1,0 +1,94 @@
+{
+  "version": "1.0",
+  "_comment": "fgui-rb 全局配置。阈值全部外置 here，引擎师用真实素材回归后可直接调，不必改代码（ARCHITECTURE §4.5 / Q21）。",
+
+  "paths": {
+    "_comment": "默认输出目录。所有产物写到这里。",
+    "outDir": "out"
+  },
+
+  "asset": {
+    "_comment": "R1 素材索引器配置。",
+    "extensions": [".png", ".jpg", ".jpeg", ".webp"],
+    "thumbSize": 96,
+    "maxInlineBytes": 5242880,
+    "grid9Thumbs": 64,
+    "scaleInfer": {
+      "_comment": "E-02 倍率推断（回应 L6/Q22）。开启后 Ch-1 同名匹配的尺寸校验按整数倍率缩放容差（倍率 k -> ±2k px），支持 1x/2x 倍图混用。默认 false：Q22 未确认是否有 2x，默认开启会改变现有行为；答案到位后只改本段。k=1 时与关闭时逐字节一致（不放松 1x 精度）；非整数比不硬凑倍率；同名同时命中 1x/2x 时全部返回标 AMBIGUOUS，不静默选取。",
+      "enabled": false,
+      "maxScale": 4
+    }
+  },
+
+  "search": {
+    "_comment": "三通道检索权重与容差。score = w1*Ch1 + w2*Ch2 + w3*Ch3，Ch-1 命中短路置顶。",
+    "weights": { "ch1": 0.5, "ch2": 0.3, "ch3": 0.2 },
+    "sizeTolerancePx": 2,
+    "topK": 10,
+    "phashMaxDistance": 12,
+    "aspectTolerance": 0.05,
+    "ambiguousConfidenceCap": 0.6
+  },
+
+  "grid9": {
+    "_comment": "九宫格适用性启发式阈值。取值哲学：不确定返 NEVER（ARCHITECTURE §4.5）。radialSpreadMin 用于把矩形描边与放射纹分开、gradientMonotonicMin 用于放行单调渐变（QA BUG#3）；数值对合成数据标定，现场需用真实素材重标（Q21）。",
+    "radialSymmetryMax": 0.88,
+    "radialSpreadMin": 0.5,
+    "radialClusterMin": 2,
+    "gradientMonotonicMin": 0.9,
+    "minSideForShape": 12,
+    "cornerFillPanelMin": 0.7,
+    "cornerFillCapsuleMax": 0.7,
+    "cornerFillRoundMax": 0.25,
+    "capsuleAspectMin": 2.0,
+    "flatMidVarianceMax": 0.15,
+    "unknownConfidence": 0.4
+  },
+
+  "diff": {
+    "_comment": "R3 差异分析器容差。l3MinScore / maxAreaRatio / maxShapeRatioFactor 是防误配的硬门槛 —— 纯色素材 pHash 会退化，必须靠几何兜住。",
+    "sizeTolerancePx": 2,
+    "positionTolerancePx": 4,
+    "phashMaxDistance": 10,
+    "phashWeight": 0.5,
+    "sizeWeight": 0.3,
+    "positionWeight": 0.2,
+    "l3MinScore": 0.6,
+    "maxAreaRatio": 4,
+    "maxShapeRatioFactor": 1.6,
+    "minRepeatCount": 3,
+    "mergedConfidenceCap": 0.5,
+    "l4Confidence": 0.15,
+    "restyleOpacityDelta": 0.02,
+    "aspectTolerance": 0.02
+  },
+
+  "psd": {
+    "_comment": "R2 PSD 解析配置。",
+    "dpr": 1,
+    "readImageData": true
+  },
+
+  "normalize": {
+    "_comment": "名称归一化。K5 铁律：只允许全等匹配，禁用任何前缀/子串包含匹配。",
+    "stripCopySuffix": true,
+    "stripExtension": true,
+    "useVariants": true
+  },
+
+  "fgui": {
+    "_comment": "P1-a FGUI 契约层 lint 配置（src/fgui/lint-rules.js）。★ 标注 [待确认] 的项依赖外部答案：答案到位后只改本段，不改代码（Q18/Q19/Q2/Q20）。",
+    "displayListTags": ["image", "text", "richtext", "input", "graph", "group", "loader", "list", "component", "movieclip"],
+    "extentionTypes": ["Button", "Label", "ComboBox", "ProgressBar", "Slider", "ScrollBar", "List", "Tree"],
+    "pkgIdLength": 8,
+    "idPrefixes": ["b", "c"],
+    "idDigits": 5,
+    "colorAttributes": ["color", "strokeColor", "fillColor"],
+    "colorRequireAlpha": false,
+    "urlAttributes": ["src", "url", "icon", "defaultItem"],
+    "exportedRequired": true,
+    "maxObjectsPerComponent": 80,
+    "bannedNamePatterns": ["^n\\d+$", "^img\\d+$", "^node\\d*$", "^\\d+$"],
+    "grid9LintEnabled": true
+  }
+}

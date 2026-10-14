@@ -1,0 +1,34 @@
+{
+  "name": "fgui-rb",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "FGUI 自动化拼 UI 工具链（Reuse-First）：切图 → 特征库 → PSD → Design IR → 差异 → change_plan.json。纯离线、零编辑器依赖。",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "bin": {
+    "fgui-rb": "bin/fgui-rb.js"
+  },
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\"",
+    "test:unit": "node --disable-warning=ExperimentalWarning --test \"test/unit/*.test.js\"",
+    "test:e2e": "node --disable-warning=ExperimentalWarning --test \"test/e2e/*.test.js\"",
+    "qa": "node --disable-warning=ExperimentalWarning test/run-qa-suite.js",
+    "fixtures": "node --disable-warning=ExperimentalWarning test/fixtures/make-assets.js && node --disable-warning=ExperimentalWarning test/fixtures/make-psd.js",
+    "selftest": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js selftest",
+    "bench": "node --disable-warning=ExperimentalWarning test/bench/search-bench.js",
+    "asset-index": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js asset-index",
+    "asset-search": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js asset-search",
+    "psd-ir": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js psd-ir",
+    "diff-plan": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js diff-plan",
+    "qa:round2": "node --disable-warning=ExperimentalWarning test/run-qa-round2.js"
+  },
+  "dependencies": {
+    "ag-psd": "31.0.3",
+    "image-size": "2.0.4",
+    "pngjs": "7.0.0",
+    "sharp": "0.34.4"
+  },
+  "devDependencies": {}
+}
