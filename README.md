@@ -45,6 +45,10 @@ npm test             # 全量测试
 npm run selftest     # 端到端：合成素材 → assets.db → design_ir → change_plan.json
 ```
 
+CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` + `windows-latest` 上跑
+`npm ci → npm run fixtures → npm test → npm run selftest`（Node 22）。
+黄金样本不入库（合成即可、且真实素材不得外传），所以 CI 显式先 `npm run fixtures`。
+
 > `selftest` 的产物在 `out/selftest/`：`change_plan.json`（人可读可改的差异计划）、
 > `ir_overlay.*.html`（bbox 叠加核对页）、`contact_sheet.html`（素材速查页）。
 
@@ -70,7 +74,7 @@ NODE_PATH="C:/Users/Lee/.workbuddy/binaries/node/workspace/node_modules" \
 ```bash
 npm run fixtures     # 造合成黄金样本：25 张切图 + 2 份邮件弹窗 PSD
 npm run selftest     # 跑通全链路，产出全套产物到 out/selftest/
-npm test             # 197 个用例，含确定性（B9）与禁网（K1）验证
+npm test             # 405 个用例，含确定性（B9）、禁网（K1）与跨平台路径验证
 ```
 
 ---
@@ -107,7 +111,7 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 | 1 | 未预期异常 |
 | 2 | 参数错误 / 功能未就绪 |
 | 3 | lint 阻断，未写盘（P1） |
-| **4** | **存在未确认 `INFERRED`，产物已生成但不可进下一步** |
+| **4** | **存在未确认 `INFERRED` 或未确认的歧义匹配（同名多候选），产物已生成但不可进下一步** |
 | 5 | 写盘事务失败，已回滚（P1） |
 
 ---
@@ -205,15 +209,32 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 `RESTYLE`（不生成新图，用运行时 color+alpha）/ `ADD`（重复结构→GList+Cell）/
 `REMOVE`（默认 `visible=false` 或移 stash，**不直接删**）/ `INFERRED`。
 
-### 合并图层标记
+### 合并图层标记（启发式信号，非硬约束）
 
 对应「第二份 PSD 只给新增素材分层，重复素材被合并」的业务事实。
-被合并的组打 `merged: true` 并输出 `lost_info` 警告进人工确认队列。**漏报 = 后面必猜错。**
+检测器按**文档是否有切片**分两档（真实 PSD 往往整份无切片，此时「无切片」是常态而非证据）：
 
-`merged` 组内节点的硬规则：
-- 只允许 **L3** 匹配（**不走 L1/L2** —— 被合并的组里已经没有分层信息了）；
-- 匹配置信度**强制封顶 0.5**（含 REMOVE：被合并藏起来的层看起来就像「被删了」）；
-- 匹配失败一律 `L4 → INFERRED`，`defaultIfUnconfirmed = 'skip'`。
+| 档 | 判据 | IR 字段 / 告警 |
+|---|---|---|
+| 强证据 | 文档有切片 + 该组整棵子树全栅格、无文本层/智能对象、无切片 | `merged: true` + `MERGED_LAYER_GROUP`（进人工确认队列） |
+| 弱信号 | 文档**无**切片 + 同样形态 | `suspectedMerged: true` + `SUSPECTED_MERGED_GROUP`（info 级提示） |
+
+★ 这两种标记**都不改变匹配路径，只影响未命中去向**（成本不对称：误判为合并会无理放弃
+L1/L2 精确匹配，代价高；漏判时真合并组在第二份 PSD 里没有独立子层，L1/L2 本来就会失败，代价低）：
+
+- 组内图层**照常走 L1/L2/L3**（匹配成功，尤其 L1 slice 名一致 / L2 归一名全等，本身就是「未被合并」的证据）；
+- 仅 L3（视觉相似，弱证据）命中疑似合并对象时置信度封顶 0.5；
+- 未命中且位于 `merged` / `suspectedMerged` 组内的图层进 `INFERRED`（留人工确认）而非 `ADD`；
+  `REMOVE` 侧同样压置信度（被合并藏起来的层看起来就像「被删了」）。
+
+> 当前启发式**尚未用真实 PSD 标定误报率** —— 已知限制，见文末。
+
+### 歧义匹配也进人工确认队列
+
+同名多候选时（如目标态有两个 `图标`），匹配器仍确定性取第一个（保证可复现），
+但会标 `ambiguous: true` 并在 `candidates` 里**保留全部候选**：
+人工在 `change_plan.json` 里把该条目的 `resolved` 设为选定候选 id 后即放行（退出码转 0）。
+这是「可放行的人工确认」，不是「有歧义就永远不能进 gen-xml」。
 
 ### 上游踩坑 → 代码硬约束
 
@@ -230,16 +251,16 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 
 ## QA 独立验证（第二轮）
 
-QA 工程师用**不复用我任何测试与 fixture** 的 9 个独立脚本做了对抗性验证
-（`qa/` 目录下 9 个独立脚本，全部可重复执行），判定 IS_PASS: NO。修复后：
+QA 工程师用**不复用我任何测试与 fixture** 的独立脚本做了对抗性验证
+（现共 `qa/` 9 + `qa-round2/` 6 + `qa-p1a/` 8 = 23 个脚本，全部可重复执行），判定 IS_PASS: NO。修复后：
 
 ```bash
-npm test        # 249 个自测用例（含 50 条新增回归）
-npm run qa      # 10 个 QA 独立验证脚本 —— 把「第二双眼睛」固化为可重复执行
+npm test        # 405 个自测用例
+npm run qa      # qa/ + qa-round2/ + qa-p1a/ 共 23 个独立脚本
 ```
 
-自测 **249/249 全绿**；QA 脚本从 **8 fail → 4 fail**（剩余 4 项为九宫格阈值，
-需真实素材标定，见实现报告 §12.7）。
+自测 **405/405 全绿**；QA 脚本剩余 **6 个 fail，全部为九宫格阈值项**
+（启发式对合成数据标定，需真实素材重标，见 `fgui.config.json` 的 `grid9` 段与实现报告 §12.7）。
 
 修复的两个 P0 静默错误（都不报错、结果错，且都落在「人工核对手段」上）：
 
@@ -271,6 +292,7 @@ npm run qa      # 10 个 QA 独立验证脚本 —— 把「第二双眼睛」�
 | 15 | **`--now` 是空壳 flag**（`--help` 承诺了但无消费者） | 接通到 `run_meta.generatedAt` 与 `.bak` 文件名；非法值直接报错 |
 | 16 | `atomic ↔ fs-json` 循环依赖（表现为 `ensureDir is not a function`） | `atomic.js` 本地实现 `ensureDir`，不反向依赖 |
 | 17 | **自己造数据自己验证 = 自证循环** | 关键对账改用独立算法；`qa/` 独立脚本接进 `npm run qa` |
+| 18 | `path.relative()` 用**宿主 OS** 规则 → Linux 上 `D:\UItool\out` 被当成普通目录名，产物里泄漏绝对路径（Ubuntu CI 才暴露） | `toPosixRel` 按输入形态选 `path.win32` / `path.posix` 规则集（与宿主无关）；跨形态/跨盘符**明确报错**，结果再做「不得是绝对路径」守卫 |
 
 ---
 
@@ -293,20 +315,32 @@ D:\UItool\
 │  └─ report/                  html-shell / ir-overlay
 ├─ test/
 │  ├─ fixtures/                make-assets.js / make-psd.js（★ 破解无素材死结）
-│  ├─ unit/                    9 个单测文件
+│  ├─ unit/                    21 个单测文件（405 个用例）
 │  ├─ e2e/                     p0-pipeline.test.js / run-cli.js
 │  └─ bench/                   search-bench.js（不进 CI）
-└─ docs/                       PRD / ARCHITECTURE / IMPLEMENTATION-REPORT
+└─ docs/                       公开仓库仅保留 ARCHITECTURE.md（内部交接文档不入库）
+                               + 上游参考副本 *.baseline
 ```
 
 ---
 
-## 本轮范围
+## 本轮范围与已知限制
 
-**P0（R1 + R2 + R3）已完成并全链路自测。**
-P1（R4 XML 生成 + R5 现场验证包）本轮**不实现**——
-本机无 FairyGUI / Unity / C# 环境，写出的 XML 没有任何办法验证。
-`gen-xml` 命令会诚实上报未实现，并列出被小 Q 阻塞的 6 个问题（Q1~Q6）。
+**已完成：** P0（R1 素材索引 + R2 PSD 解析 + R3 差异分析）全链路自测；
+P1-a 契约层（FGUI 常量表 / 纯函数 lint / 事务写盘）—— 纯函数部分可完整单测。
+
+**未实现：** R4 `gen-xml`（生成组件 XML）与 R5（现场验证发布包）。
+本机无 FairyGUI / Unity / C# 环境，写出的 XML 没有任何办法验证 ——
+`gen-xml` 命令会诚实上报未实现，并列出被阻塞的问题（Q1~Q6）。
+
+已知限制（诚实清单）：
+
+| 项 | 说明 |
+|---|---|
+| 九宫格阈值 | 对**合成数据**标定，QA 脚本仍有 6 项阈值 fail；需真实素材重标（阈值全外置在 `fgui.config.json`，不必改代码） |
+| `merged` / `suspectedMerged` 启发式 | **尚未用真实 PSD 测量误报率**；当前设计成「不影响匹配路径、只影响未命中去向」，误报的代价已被压到最低，但真实数据下的表现待验证 |
+| 素材索引特征 | pHash 对纯色/大面积平涂会退化（已加面积比+形状比门槛兜底，仍属启发式） |
+| 生成侧验证 | 无 FGUI 工程副本，P1 的 lint/事务写盘只在单测层验证，未对真实编辑器产物对账 |
 
 完整实测记录（确定性 md5 证据、与架构文档的偏差、哪些验收项因缺真实素材
 暂无法验证）见仓库内 `qa/`、`qa-round2/`、`qa-p1a/` 三个独立验证目录——
