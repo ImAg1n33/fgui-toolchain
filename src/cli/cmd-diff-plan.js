@@ -12,14 +12,15 @@
  *   change_plan.md        人工修正清单的可读版（R4-F7 的 P0 预览）
  *   run_meta.json
  *
- * 退出码：4 (NEEDS_HUMAN) —— 存在未确认的 INFERRED，产物已生成但不可进下一步。
+ * 退出码：4 (NEEDS_HUMAN) —— 存在未确认的 INFERRED **或未确认的歧义匹配**
+ * （同名多候选，需在 change_plan.json 里填 resolved 放行），产物已生成但不可进下一步。
  * 这是刻意的：让脚本能自动判断「这份 plan 能不能直接喂给 gen-xml」。
  */
 
 const fs = require('fs');
 const path = require('path');
 const { readJson, writeJson, writeText, ensureDir } = require('../core/fs-json');
-const { buildChangePlan, renderPlanMarkdown } = require('../diff/planner');
+const { buildChangePlan, renderPlanMarkdown, planNeedsHuman } = require('../diff/planner');
 const { AssetStore } = require('../assets/store');
 const { OP } = require('../diff/classifier');
 const { flagStr } = require('./args');
@@ -121,6 +122,10 @@ async function run(ctx) {
       // ★ --now 注入点：传固定值可让 run_meta.json 也可复现（原为 new Date()，是空壳 flag）
     });
 
+    // ★ UPSTREAM-FIX-7：需要人工确认的有两类 —— 未确认的 INFERRED **和**
+    //   未确认的歧义匹配（同名多候选）。旧实现只看 INFERRED，歧义会静默绕过确认，
+    //   而 gen-xml 会直接消费这个判定（素材可能取错却无人复核）。
+    const human = planNeedsHuman(plan);
     const inferred = plan.diffs.filter((d) => d.op === OP.INFERRED);
     process.stdout.write(JSON.stringify({
       command: 'diff-plan',
@@ -131,17 +136,19 @@ async function run(ctx) {
       },
       summary: plan.summary,
       inferredCount: inferred.length,
-      needsHuman: inferred.length > 0,
-      exitCodeMeaning: inferred.length > 0
-        ? `退出码 ${EXIT.NEEDS_HUMAN}：存在 ${inferred.length} 个未确认的 INFERRED（默认 skip），`
+      ambiguousCount: human.ambiguousCount,
+      needsHuman: human.needsHuman,
+      exitCodeMeaning: human.needsHuman
+        ? `退出码 ${EXIT.NEEDS_HUMAN}：${human.reasons.join('；')}。`
           + '需人工确认后才可进入 P1 gen-xml'
-        : '无未确认 INFERRED，可进入 P1 gen-xml',
+          + (human.ambiguousCount ? '（歧义条目：在 change_plan.json 里把 resolved 设为候选 id 即可放行）' : '')
+        : '无未确认 INFERRED / 歧义匹配，可进入 P1 gen-xml',
       structureAdvice: plan.structureAdvice.map((a) => ({ type: a.type, slot: a.slot, reason: a.reason })),
       openQuestions: plan.openQuestions,
     }, null, 2) + '\n');
 
     // ★ 退出码 4：产物已生成，但不可进下一步（§8.1）
-    return inferred.length > 0 ? EXIT.NEEDS_HUMAN : EXIT.OK;
+    return human.needsHuman ? EXIT.NEEDS_HUMAN : EXIT.OK;
   } finally {
     if (store) store.close();
   }

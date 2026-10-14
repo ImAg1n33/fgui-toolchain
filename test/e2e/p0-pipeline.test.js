@@ -26,7 +26,7 @@ const { runCli, runCliJson } = require('./run-cli');
 const { EXIT } = require('../../src/core/errors');
 const { makeAssets } = require('../fixtures/make-assets');
 const { makePsds } = require('../fixtures/make-psd');
-const { readJson } = require('../../src/core/fs-json');
+const { readJson, writeJson } = require('../../src/core/fs-json');
 
 const ROOT = path.resolve(__dirname, '../..');
 const GOLDEN = path.join(ROOT, 'test/fixtures/golden');
@@ -328,6 +328,73 @@ test('★ merged 启发式：精确匹配不再受限，仅弱证据/未命中�
     assert.ok(checkedWeak > 0, '★ 黄金样本中应存在疑似合并组内的 L3/REMOVE 保守路径');
     assert.ok(plan.openQuestions.some((q) => q.includes('被合并')),
       '★ 合并组必须进人工确认队列（漏报 = 后面必猜错）');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ UPSTREAM-FIX-7: 歧义匹配（同名多候选）必须触发 NEEDS_HUMAN 退出码 4', async (t) => {
+  if (!ensureFixtures()) return t.skip('fixture 未生成');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-amb-'));
+  try {
+    // 造两份最小 IR：基准 1 个『图标』，目标 2 个同名同尺寸『图标』 → L2 歧义。
+    // 关键：几何完全一致（会被判 REUSE），旧逻辑下 needsHuman 只看 INFERRED
+    // → 歧义静默绕过确认 → gen-xml 会引用可能与画师意图不符的那一个。
+    const mkLayer = (id, name, x) => ({
+      id,
+      name,
+      normName: name,
+      parent: null,
+      type: 'raster',
+      bbox: { x, y: 0, w: 64, h: 64 },
+      bboxSource: 'own',
+      rotation: 0,
+      opacity: 1,
+      visible: true,
+      blend: 'normal',
+      merged: false,
+      suspectedMerged: false,
+      childCount: 0,
+      sliceName: null,
+      phash: null,
+      text: null,
+    });
+    const ir = (layers) => ({
+      version: '1.0',
+      source: { psdPath: 'x.psd', psdSha256: 'x'.repeat(64), canvas: { w: 200, h: 200 }, dpr: 1 },
+      layers,
+      warnings: [],
+      slices: [],
+      sliceNames: [],
+    });
+    const basePath = path.join(dir, 'design_ir.A.json');
+    const targetPath = path.join(dir, 'design_ir.B.json');
+    writeJson(basePath, ir([mkLayer('L001', '图标', 0)]));
+    writeJson(targetPath, ir([mkLayer('L001', '图标', 0), mkLayer('L002', '图标', 80)]));
+
+    const res = runCliJson([
+      'diff-plan', '--root', ROOT,
+      '--base', basePath, '--target', targetPath,
+      '--name', 'AmbiguousCase', '--base-pkg', 'Common', '--target-pkg', 'Common',
+      '--out', dir,
+    ]);
+    assert.equal(res.code, EXIT.NEEDS_HUMAN,
+      `★ 歧义匹配必须让退出码为 4（NEEDS_HUMAN），实得 ${res.code}`);
+    assert.equal(res.json.needsHuman, true, '★ stdout 的 needsHuman 必须为 true');
+    assert.equal(res.json.ambiguousCount, 1, '应统计到 1 条未确认歧义');
+
+    const plan = readJson(path.join(dir, 'change_plan.json'));
+    const amb = plan.diffs.filter((d) => d.ambiguous);
+    assert.equal(amb.length, 1, 'plan 里应有 1 条 ambiguous 条目');
+    assert.equal(amb[0].candidates.length, 2, '★ 必须保留全部候选供人工选择');
+    assert.equal(amb[0].resolved, null, '未确认时 resolved 为 null');
+    assert.ok(amb[0].evidence.includes('resolved'), 'evidence 应教人怎么放行');
+
+    // ---- 放行路径：人工填 resolved 后不再阻断 ----
+    const { planNeedsHuman } = require('../../src/diff/planner');
+    amb[0].resolved = 'L002';
+    assert.equal(planNeedsHuman(plan).needsHuman, false,
+      '★ 人工选定候选后必须放行（不能做成「有歧义就永远进不了 gen-xml」）');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

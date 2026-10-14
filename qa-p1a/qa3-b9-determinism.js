@@ -122,11 +122,11 @@ console.log('\n=== QA3-B3. 与工程师报告 §13.7 的声称值对比 ===');
   //   确定性本身（3 次运行逐字节一致）由 QA3-B2 独立保证，不受基线刷新影响。
   //   历史基线：初版 A=53b15863… B=00edebd7…（FIX-1 前）；
   //             FIX-1 后 A=fd741acb8af4273c8b802bd60bbab7a8 B=6b2a80d34243050c02b7029b11dcbdf2；
-  //             change_plan 初版=27279d2fad69ad1274bf86c58ff091f3（FIX-4 前）。
+  //             change_plan 初版=27279d2f…（FIX-4 前）、FIX-4 后=4dc16c59…（FIX-7 前）。
   const CLAIMED = {
     'design_ir.A.json': '3d3cb03cf530a0d7056d5428a7f9c246',
     'design_ir.B.json': '341d4c816c53e59609e9f4dea98e9279',
-    'change_plan.json': '4dc16c597b35252b70e4434c9183fd5c',
+    'change_plan.json': '7a44f2681a91adbcf926e321b8ac7e56',
     'map.json': '83c8ef6a4827076dffa3dbc5d94a2f32',
   };
   for (const [name, want] of Object.entries(CLAIMED)) {

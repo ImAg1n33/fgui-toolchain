@@ -319,8 +319,13 @@ function matchLayers(args) {
     // 同名多候选：优先尺寸吻合的；仍多个则取 id 最小的（确定性），并降置信度 + 标 AMBIGUOUS
     const sized = cands.filter((t) => sameSize(b.bbox, t.bbox, sizeTol));
     const pool = sized.length ? sized : cands;
-    const hit = pool.slice().sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))[0];
-    const ambiguous = pool.length > 1;
+    // ★ UPSTREAM-FIX-7：歧义必须保留**全部候选**供人工选择（只留被选中的那一个，
+    //   人工就无法在 change_plan.json 里改判 —— 确定性取第一个可能取错素材）
+    const poolIds = pool.slice()
+      .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))
+      .map((t) => t.id);
+    const hit = pool.find((t) => t.id === poolIds[0]);
+    const ambiguous = poolIds.length > 1;
     const sizeOk = sameSize(b.bbox, hit.bbox, sizeTol);
     take(b, hit, LEVEL.L2, ambiguous ? 0.7 : (sizeOk ? 0.95 : 0.8),
       `L2 归一化名全等一致：'${b.name}' 与 '${hit.name}' 归一化后均为 '${b.normName}'`
@@ -328,8 +333,16 @@ function matchLayers(args) {
       + (sizeOk
         ? `，且尺寸吻合（${b.bbox.w}x${b.bbox.h}）`
         : `，但尺寸有变化（${b.bbox.w}x${b.bbox.h} -> ${hit.bbox.w}x${hit.bbox.h}）`)
-      + (ambiguous ? `；⚠ 同名候选 ${pool.length} 个，已按尺寸与 id 确定性取 '${hit.name}'，需人工复核` : ''),
-      { sizeMatched: sizeOk, posMatched: samePos(b.bbox, hit.bbox, posTol), ambiguous });
+      + (ambiguous
+        ? `；⚠ 同名候选 ${poolIds.length} 个（${poolIds.join('、')}），已按尺寸与 id 确定性取 '${hit.name}'，`
+          + '**需人工复核**：请在 change_plan.json 里把该条目的 resolved 设为选定候选的 id'
+        : ''),
+      {
+        sizeMatched: sizeOk,
+        posMatched: samePos(b.bbox, hit.bbox, posTol),
+        ambiguous,
+        ambiguousCandidates: ambiguous ? poolIds : [],
+      });
   }
 
   // ================= L3：pHash + 尺寸 + 位置 =================

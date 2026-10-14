@@ -16,6 +16,7 @@ const {
   classifyPair, classifyUnmatchedTarget, classifyUnmatchedBase,
   summarize, sameAspect, styleChanged, OP,
 } = require('../../src/diff/classifier');
+const { buildChangePlan, renderPlanMarkdown, planNeedsHuman } = require('../../src/diff/planner');
 const { advise, findRepeatedClusters, collectOpenQuestions, ADVICE } = require('../../src/diff/structure-advisor');
 
 const CFG = {
@@ -220,6 +221,73 @@ test('isUnderMerged: 沿父链向上查找', () => {
   assert.equal(isUnderMerged(byId.get('L002'), byId), true);
   assert.equal(isUnderMerged(byId.get('L003'), byId), true, '深层子层也应识别');
   assert.equal(isUnderMerged(byId.get('L004'), byId), false);
+});
+
+// ======================================================================
+// ★ UPSTREAM-FIX-7：歧义匹配（同名多候选）必须进人工确认队列
+// ======================================================================
+
+/** 造一份最小 IR（buildChangePlan 只需 layers/source/task 形状）。 */
+function miniIr(layers) {
+  return {
+    version: '1.0',
+    source: { psdPath: 'x.psd', psdSha256: 'x', canvas: { w: 200, h: 200 }, dpr: 1 },
+    layers, warnings: [], slices: [], sliceNames: [],
+  };
+}
+
+test('★ 歧义匹配: 同名多候选必须保留全部候选并阻断（needsHuman=true）', () => {
+  // base 一个『图标』，target 两个同名同尺寸『图标』 → L2 歧义
+  const base = [
+    layer({ id: 'L001', name: '图标', normName: '图标', bbox: { x: 0, y: 0, w: 64, h: 64 } }),
+  ];
+  const target = [
+    layer({ id: 'L001', name: '图标', normName: '图标', bbox: { x: 0, y: 0, w: 64, h: 64 } }),
+    layer({ id: 'L002', name: '图标', normName: '图标', bbox: { x: 80, y: 0, w: 64, h: 64 } }),
+  ];
+  const plan = buildChangePlan({
+    baseIr: miniIr(base),
+    targetIr: miniIr(target),
+    task: { name: '歧义回归', basePkg: 'Common', targetPkg: 'Common' },
+    config: { diff: CFG },
+  });
+
+  const ambiguous = plan.diffs.filter((d) => d.ambiguous);
+  assert.equal(ambiguous.length, 1, '★ 同名多候选必须被标 ambiguous');
+  assert.equal(ambiguous[0].candidates.length, 2, '★ 必须保留全部候选供人工选择（不能只留被选中的）');
+  assert.equal(ambiguous[0].resolved, null, '未确认时 resolved 为 null');
+  assert.ok(ambiguous[0].evidence.includes('resolved'), 'evidence 应教人怎么放行');
+
+  const h = planNeedsHuman(plan);
+  assert.equal(h.needsHuman, true, '★ 未确认歧义必须 needsHuman=true（旧实现只看 INFERRED 会漏）');
+  assert.equal(h.ambiguousCount, 1);
+  assert.equal(h.inferredCount, 0);
+});
+
+test('★ 歧义匹配: 人工填 resolved 后放行；填非法值仍阻断', () => {
+  const base = [
+    layer({ id: 'L001', name: '图标', normName: '图标', bbox: { x: 0, y: 0, w: 64, h: 64 } }),
+  ];
+  const target = [
+    layer({ id: 'L001', name: '图标', normName: '图标', bbox: { x: 0, y: 0, w: 64, h: 64 } }),
+    layer({ id: 'L002', name: '图标', normName: '图标', bbox: { x: 80, y: 0, w: 64, h: 64 } }),
+  ];
+  const plan = buildChangePlan({
+    baseIr: miniIr(base),
+    targetIr: miniIr(target),
+    task: { name: '歧义放行', basePkg: 'Common', targetPkg: 'Common' },
+    config: { diff: CFG },
+  });
+  assert.equal(planNeedsHuman(plan).needsHuman, true);
+
+  // ① 人工选定候选（change_plan.json 可手工编辑）
+  plan.diffs.find((d) => d.ambiguous).resolved = 'L002';
+  assert.equal(planNeedsHuman(plan).needsHuman, false, '★ 填了合法 resolved 必须放行（不是永远阻断）');
+  assert.equal(planNeedsHuman(plan).ambiguousCount, 0);
+
+  // ② 随手填个不在候选里的值不得绕过确认
+  plan.diffs.find((d) => d.ambiguous).resolved = 'L999';
+  assert.equal(planNeedsHuman(plan).needsHuman, true, '★ resolved 不在候选内仍须阻断');
 });
 
 // ======================================================================

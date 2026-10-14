@@ -165,6 +165,19 @@ function buildChangePlan(args) {
       grid9Of,
       relationOf: (b, t) => relationOf(b, t, parentBox),
     });
+    // ★ UPSTREAM-FIX-7：歧义匹配（同名多候选）必须进人工确认队列 ★
+    //   确定性取第一个只是「可复现」，不等于「取对了」—— 素材可能取错，
+    //   而 gen-xml 会直接消费这个判定，所以必须留候选 + 等人工选定。
+    //   但**不做成「有歧义就永远不放行」**：人工在 change_plan.json 里把
+    //   resolved 设为选定候选 id 后即放行（见 planNeedsHuman）。
+    if (pair.ambiguous) {
+      diff.ambiguous = true;
+      diff.candidates = Array.isArray(pair.ambiguousCandidates) ? [...pair.ambiguousCandidates] : [];
+      diff.resolved = null;
+      diff.evidence += `；⚠ 同名候选 ${diff.candidates.length} 个（${diff.candidates.join('、')}），`
+        + `当前按确定性取 ${target.id}（${target.name}）—— 请在 change_plan.json 里把该条目的 `
+        + 'resolved 设为选定候选的 id，否则退出码 4（NEEDS_HUMAN）不放行进 gen-xml';
+    }
     // ★ 显式记录配对的基准侧 id：两侧 id 可能相同，光看 node 无法分辨
     diff.baseNode = base.id;
     diffs.push(diff);
@@ -270,7 +283,10 @@ function buildChangePlan(args) {
         + 'L3 弱证据命中疑似合并对象、以及疑似合并组内的 REMOVE，封顶 0.5',
       evidence: '人可读的判定依据 —— 复核与推翻的唯一依据，请认真读',
       fguiStrategy: '建议的 FGUI 处理方式；本轮只是建议，P1 才真正生成 XML',
-      candidates: 'INFERRED 时的候选切图列表',
+      candidates: 'INFERRED 时的候选切图列表；歧义匹配时是**同名候选的图层 id 列表**'
+        + '（人工在 resolved 里填其中一个即可放行）',
+      resolved: '人工确认后填入选定候选的 id（仅 ambiguous 条目需要）；填入后不再阻断 gen-xml',
+      ambiguous: 'true = 同名多候选，当前只是「确定性取了一个」，素材可能取错 —— 需人工确认',
       defaultIfUnconfirmed: '未确认时怎么办。当前恒为 skip（PRD K4）',
     },
     _opLabel: OP_LABEL,
@@ -291,6 +307,52 @@ function buildChangePlan(args) {
     diffs: sortedDiffs,
     structureAdvice: advice,
     openQuestions,
+  };
+}
+
+/**
+ * 判断一份 ChangePlan 是否还需要人工确认（供 CLI 退出码与未来 gen-xml 共用）。
+ *
+ * ★ UPSTREAM-FIX-7 ★
+ *   旧实现只统计 INFERRED —— 于是「同名多素材 → 确定性取第一个 → 判 REUSE」
+ *   这条路径完全绕过人工确认：素材可能取错，而 gen-xml 会直接引用它。
+ *   现在两类都算：
+ *     ① 未确认的 INFERRED（低置信度，默认 skip）
+ *     ② 未确认的歧义匹配（ambiguous 且 resolved 未填）
+ *
+ * ★ 放行路径（不是「有歧义就永远不能进 gen-xml」）★
+ *   人工在 change_plan.json 里把该条目的 `resolved` 设为候选列表里某个 id
+ *   后，该条目即视为已确认。resolved 不在候选列表内则仍视为未确认
+ *   （防止随手填个值就绕过确认）。
+ *
+ * @param {Object} plan ChangePlan
+ * @returns {{needsHuman:boolean, inferredCount:number, ambiguousCount:number, reasons:string[]}}
+ */
+function planNeedsHuman(plan) {
+  const diffs = (plan && plan.diffs) || [];
+  const inferred = diffs.filter((d) => d.op === OP.INFERRED);
+  const ambiguous = diffs.filter((d) => {
+    if (!d.ambiguous) return false;
+    const resolved = typeof d.resolved === 'string' ? d.resolved.trim() : '';
+    if (!resolved) return true;
+    // resolved 必须在候选列表内；候选缺失时不苛求（旧 plan 兼容）
+    if (Array.isArray(d.candidates) && d.candidates.length && !d.candidates.includes(resolved)) {
+      return true;
+    }
+    return false;
+  });
+  const reasons = [];
+  if (inferred.length) {
+    reasons.push(`存在 ${inferred.length} 个未确认的 INFERRED（默认 skip）`);
+  }
+  if (ambiguous.length) {
+    reasons.push(`存在 ${ambiguous.length} 条未确认的歧义匹配（同名多候选，需在 resolved 里选定）`);
+  }
+  return {
+    needsHuman: inferred.length > 0 || ambiguous.length > 0,
+    inferredCount: inferred.length,
+    ambiguousCount: ambiguous.length,
+    reasons,
   };
 }
 
@@ -338,7 +400,11 @@ function renderPlanMarkdown(plan) {
         + `${d.fguiStrategy.detail ? JSON.stringify(d.fguiStrategy.detail) : ''}`);
     }
     if (d.candidates && d.candidates.length) {
-      lines.push(`- **候选**：${d.candidates.join('、')}`);
+      const note = d.ambiguous
+        ? `**同名多候选（歧义）**：候选 ${d.candidates.join('、')}；`
+          + (d.resolved ? `已确认 resolved=${d.resolved}` : '**未确认** —— 请把该条目的 resolved 设为选定候选 id')
+        : '候选';
+      lines.push(`- ${note}${d.ambiguous ? '' : `：${d.candidates.join('、')}`}`);
     }
     lines.push('');
   }
@@ -360,4 +426,6 @@ function renderPlanMarkdown(plan) {
   return lines.join('\n');
 }
 
-module.exports = { buildChangePlan, renderPlanMarkdown, relationOf, PLAN_VERSION };
+module.exports = {
+  buildChangePlan, renderPlanMarkdown, relationOf, planNeedsHuman, PLAN_VERSION,
+};
