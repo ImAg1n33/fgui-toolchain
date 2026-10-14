@@ -1,0 +1,53 @@
+# CI for fgui-rb (suggestion #3 from the external review of the open-sourced repo).
+#
+# What it runs on a fresh clone:
+#   1. npm ci            — reproducible install from the committed package-lock.json
+#                          (no NODE_PATH tricks: ag-psd / image-size / pngjs / sharp
+#                          are all declared in package.json dependencies)
+#   2. npm run fixtures  — golden fixtures are NOT committed (art assets must stay
+#                          out of the repo, PRD K1-4; test/fixtures/golden/ is
+#                          gitignored). Both make-assets.js and make-psd.js are
+#                          deterministic, so the fixtures rebuild identically.
+#   3. npm test          — unit + e2e suites (e2e shells out to bin/fgui-rb.js)
+#   4. npm run selftest  — CLI self-test (also regenerates fixtures itself,
+#                          kept after npm test as an independent end-to-end check)
+#
+# Note: `npm test` on a fresh clone would technically skip e2e cases whose
+# fixtures are missing; generating fixtures up front makes every case run.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (npm ci)
+        run: npm ci --no-audit --no-fund
+
+      - name: Rebuild golden fixtures (deterministic, not committed)
+        run: npm run fixtures
+
+      - name: Run test suite (unit + e2e)
+        run: npm test
+
+      - name: CLI selftest
+        run: npm run selftest
