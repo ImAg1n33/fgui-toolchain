@@ -116,6 +116,69 @@ test('toPosixRel: Windows 路径转 POSIX 相对路径', () => {
   assert.ok(!rel.includes('\\'), '不应残留反斜杠');
 });
 
+// ★ UPSTREAM-FIX-6：toPosixRel 跨平台（Ubuntu CI 曾红：得到 ../D:/UItool/...）
+//   旧的 path.relative() 用宿主 OS 规则 —— Linux 上反斜杠不是分隔符，
+//   Windows 绝对路径被当成普通目录名，产物里直接泄漏绝对路径。
+//   以下断言在任何 OS 上都成立（内部改用 win32/posix 规则集，不依赖宿主）。
+
+test('★ toPosixRel: Windows 输入在 Linux 语义下也正确（用 win32 规则集，不靠宿主 OS）', () => {
+  // 即使当前宿主是 Linux，Windows 形态输入也必须走 path.win32 规则
+  const rel = toPosixRel('D:\\UItool\\out', 'D:\\UItool\\out\\sub\\x.json');
+  assert.equal(rel, 'sub/x.json');
+  // 与手动用 path.win32 算出的结果逐字一致（证明不是碰巧）
+  assert.equal(rel, path.win32.relative('D:\\UItool\\out', 'D:\\UItool\\out\\sub\\x.json').replace(/\\/g, '/'));
+  // ★ 若按 POSIX（Linux）规则算，Windows 绝对路径会被当成普通目录名 → 得到
+  //   '../D:/UItool/out/sub/x.json'（这正是 Ubuntu CI 红的那条）。断言「不等于」
+  //   即把该回归钉死：实现必须**按输入形态选规则集**，不能一律用宿主/posix 规则。
+  const linuxSemantics = path.posix.relative('D:\\UItool\\out', 'D:\\UItool\\out\\sub\\x.json');
+  assert.notEqual(rel, linuxSemantics,
+    `★ 用 POSIX 规则算会得到 ${linuxSemantics}（绝对路径泄漏）—— 实现必须按形态选规则集`);
+  assert.ok(/^\.\.\//.test(linuxSemantics), '本断言本身有效：POSIX 规则下确实会泄漏绝对路径');
+  // POSIX 输入走 path.posix 规则（与宿主 OS 无关）
+  assert.equal(toPosixRel('/repo/out', '/repo/out/sub/x.json'), 'sub/x.json');
+});
+
+test('★ toPosixRel: 路径形态混用 / 跨盘符 → 明确报错（不静默给错）', () => {
+  // 混用：一侧 Windows 一侧 POSIX
+  assert.throws(() => toPosixRel('/repo/out', 'D:\\UItool\\out\\x.json'),
+    (err) => err.code === 'BAD_ARGUMENT' && /形态不一致/.test(err.message));
+  // 跨盘符：相对路径在语义上不存在，path.win32 会返回绝对路径 —— 必须拦下
+  assert.throws(() => toPosixRel('C:\\work\\out', 'D:\\UItool\\out\\x.json'),
+    (err) => err.code === 'BAD_ARGUMENT' && /同一个根/.test(err.message));
+});
+
+test('★ writeJson 跨盘符降级: 相对路径不存在时写 outside-root/<文件名>，绝不写绝对路径', () => {
+  // 真实场景：PSD 放在另一个盘（C:）而项目根在 D: —— 「相对路径」语义上不存在。
+  // 旧实现会把 C:\Users\... 直接写进产物（B9 事故）；现在降级为确定性标记值。
+  const dir = tmpDir('det-outside');
+  const p = path.join(dir, 'o.json');
+  writeJson(p, { source: { psdPath: 'C:\\Users\\someone\\solid.psd' } }, { root: 'D:\\UItool' });
+  const text = fs.readFileSync(p, 'utf8');
+  assert.ok(text.includes('outside-root/solid.psd'), `应降级为 outside-root/<文件名>：${text}`);
+  assert.ok(!/[A-Za-z]:[\\/]/.test(text), `★ 产物内绝不允许出现绝对路径：${text}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('★ toPosixRel: 任何输入组合都不得泄漏绝对路径（机器化守卫）', () => {
+  const cases = [
+    ['D:\\UItool\\out', 'D:\\UItool\\out\\sub\\x.json'],
+    ['D:/UItool/out', 'D:/UItool/out/sub/x.json'],
+    ['/repo/out', '/repo/out/sub/x.json'],
+    ['out', 'out/sub/x.json'],
+    ['\\\\srv\\share\\root', '\\\\srv\\share\\root\\a\\b.json'], // UNC
+  ];
+  for (const [from, target] of cases) {
+    const rel = toPosixRel(from, target);
+    assert.ok(!/^[A-Za-z]:/.test(rel),
+      `★ 产物内绝不允许出现 Windows 绝对路径：${from} + ${target} -> ${rel}`);
+    assert.ok(!rel.includes('\\'), `不应残留反斜杠：${rel}`);
+  }
+  // UNC 同根可算、跨根报错
+  assert.equal(toPosixRel('\\\\srv\\share\\root', '\\\\srv\\share\\root\\a\\b.json'), 'a/b.json');
+  assert.throws(() => toPosixRel('\\\\srv\\share\\root', '\\\\other\\share\\root\\a.json'),
+    (err) => err.code === 'BAD_ARGUMENT');
+});
+
 test('atomicWrite: 注入固定 now 时 .bak 文件名稳定（B9 可验证）', () => {
   const dir = tmpDir('atomic');
   const target = path.join(dir, 'f.txt');

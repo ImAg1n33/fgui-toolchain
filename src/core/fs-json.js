@@ -11,7 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { sortKeysDeep, roundDeep, toPosixRel } = require('./determinism');
+const { sortKeysDeep, roundDeep, toPosixRel, toPosix } = require('./determinism');
 const { AppError, CODES } = require('./errors');
 const { atomicWrite } = require('./atomic');
 
@@ -72,6 +72,31 @@ function writeJson(filePath, value, opts = {}) {
  * @param {string} root
  * @returns {unknown}
  */
+/**
+ * 单个路径值的相对化（含跨根降级）。
+ *
+ * ★ 为什么需要降级 ★
+ *   `toPosixRel()` 在跨盘符 / 跨 UNC 根 / 形态混用时会**明确报错** —— 此时
+ *   「相对路径」在语义上不存在，而旧实现会静默把 `C:\Users\...` 写进产物
+ *   （B9 事故）。但 CLI 也不该因为「PSD 放在另一个盘」就整体崩掉，所以这里
+ *   降级为 `outside-root/<文件名>`：确定性、不含任何绝对路径信息；
+ *   原因由调用方（CLI）另行告警，绝不静默。
+ *
+ * @param {string} val 待相对化的路径值
+ * @param {string} root 基准目录
+ * @returns {string}
+ */
+function relativizePathValue(val, root) {
+  try {
+    return toPosixRel(root, val);
+  } catch (err) {
+    if (err && err.code === 'BAD_ARGUMENT') {
+      return `outside-root/${toPosix(path.basename(val))}`;
+    }
+    throw err;
+  }
+}
+
 function relativizePaths(value, root) {
   const PATH_KEYS = new Set([
     'psdPath', 'psdBase', 'psdTarget', 'relPath', 'path', 'assetPath', 'file', 'fguiProject',
@@ -83,7 +108,7 @@ function relativizePaths(value, root) {
       for (const key of Object.keys(node)) {
         const val = node[key];
         if (PATH_KEYS.has(key) && typeof val === 'string' && val && !val.startsWith('null')) {
-          out[key] = toPosixRel(root, val);
+          out[key] = relativizePathValue(val, root);
         } else {
           out[key] = walk(val);
         }

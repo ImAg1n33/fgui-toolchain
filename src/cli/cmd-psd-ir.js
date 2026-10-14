@@ -63,6 +63,18 @@ async function run(ctx) {
 
     logger.info('解析 PSD', { file: path.basename(abs), mode, label });
 
+    // ★ 跨盘符 / 项目根之外：IR 里不会有相对路径（写绝对路径是 B9 事故），
+    //   fs-json 会降级为 `outside-root/<文件名>` —— 这里显式告警，绝不静默。
+    const rootAbs = path.resolve(rootDir);
+    const insideRoot = abs.toLowerCase() === rootAbs.toLowerCase()
+      || abs.toLowerCase().startsWith(rootAbs.toLowerCase() + path.sep);
+    if (!insideRoot) {
+      logger.warn('PSD 不在项目根目录内（跨盘符或跨根）：IR 的 source.psdPath 只记录文件名', {
+        file: path.basename(abs),
+        note: '相对路径不存在（写绝对路径会违反 B9 确定性），sha256 可用于溯源',
+      });
+    }
+
     const parsed = readPsdFile(abs, { mode });
     const slices = extractSlices(parsed.psd);
 
