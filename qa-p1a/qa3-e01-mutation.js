@@ -5,7 +5,8 @@
  * 三部分：
  *   A. 独立复现第③个静默问题（含智能对象的组被误判 merged）：
  *      QA 自造 PSD（writePsdBuffer 真实往返），不用他的样本。
- *      含正对照（纯 raster 组必须 merged=true，证明检测器没坏）。
+ *      ★ UPSTREAM-FIX-1 后：无切片 PSD 走疑似档（SUSPECTED_MERGED_GROUP），
+ *      强证据正对照（纯 raster 组 merged=true）改在 E1A-b 用带切片文档验证。
  *   B. 变异测试：把 3 个修复逐一改回旧行为，断言 E-01 测试必须变红。
  *      （备份 → 变异 → 跑测试 → 恢复，finally 保证恢复）
  *   C. 新静默问题排查：用 P0「测试绿但行为错」的同款方式再找一轮。
@@ -73,14 +74,28 @@ function smart(name, x, y, w, h, transform) {
   };
 }
 
-/** QA 自造 PSD → 真实往返 → IR。 */
-function roundtrip(name, layers, mode = 'full') {
+/** QA 自造 PSD → 真实往返 → IR。
+ *
+ * ★ UPSTREAM-FIX-1 后语义说明 ★：本脚本自造的 PSD 一律不带切片资源
+ * （slices: []）。修复后「无切片文档」里全 raster 组走**弱信号疑似档**
+ * （SUSPECTED_MERGED_GROUP），不再判 merged —— 强证据正对照单独用
+ * 带 slice 的 IR 验证（见 E1A 第二段）。
+ *
+ * @param {string} name
+ * @param {Object[]} layers
+ * @param {string} [mode]
+ * @param {Object} [opts]
+ * @param {Object[]} [opts.slices] 传给 IrBuilder.build 的切片（extractSlices 输出形状）
+ * @returns {Object} IR
+ */
+function roundtrip(name, layers, mode = 'full', opts = {}) {
   const psd = { width: 300, height: 200, imageData: composeImageData(300, 200, layers), children: layers };
   const file = path.join(TMP, `${name}.psd`);
   fs.writeFileSync(file, writePsdBuffer(psd));
   const read = readPsdFile(file, { mode });
   const ir = new IrBuilder({ withPhash: mode === 'full' }).build({
-    psd: read.psd, psdPath: file, sha256: read.sha256, slices: [],
+    psd: read.psd, psdPath: file, sha256: read.sha256,
+    slices: opts.slices || [],
   });
   return ir;
 }
@@ -104,10 +119,6 @@ console.log('=== QA3-E1A. 独立复现：含智能对象的组不得判 merged =
     }]),
   ]);
 
-  ok('正对照：纯 raster 组判 merged=true（证明检测器在工作）',
-    byName(ir, 'QA纯栅组').merged === true && warnCodes(ir, 'MERGED_LAYER_GROUP').length === 1,
-    `merged=${byName(ir, 'QA纯栅组').merged} warns=${warnCodes(ir, 'MERGED_LAYER_GROUP').length}`);
-
   ok('① 纯智能对象组不判 merged', byName(ir, 'QA纯智能组').merged === false,
     `merged=${byName(ir, 'QA纯智能组').merged}`);
   ok('② 智能对象+raster 混合组不判 merged', byName(ir, 'QA混合组').merged === false,
@@ -117,9 +128,50 @@ console.log('=== QA3-E1A. 独立复现：含智能对象的组不得判 merged =
   ok('智能对象类型识别为 smartobject', byName(ir, 'QA智能对象').type === 'smartobject');
   ok('智能对象 pHash 正常计算', /^[0-9a-f]{16}$/.test(byName(ir, 'QA智能对象').phash || ''),
     `phash=${byName(ir, 'QA智能对象').phash}`);
-  ok('MERGED 告警恰好 1 条（只归纯栅组）', warnCodes(ir, 'MERGED_LAYER_GROUP').length === 1);
   ok('纯智能对象组 bbox 由子层推导', JSON.stringify(byName(ir, 'QA纯智能组').bbox) === JSON.stringify({ x: 40, y: 30, w: 100, h: 80 }),
     JSON.stringify(byName(ir, 'QA纯智能组').bbox));
+
+  // ★ UPSTREAM-FIX-1 语义更新（改测试要被看见）★
+  //   本 PSD 无切片（slices: []），旧断言「纯 raster 组判 merged=true」按新两档语义
+  //   改为：不判 merged + 发 SUSPECTED_MERGED_GROUP 疑似提示（info 级）。
+  //   旧断言验证的业务语义「检测器能识别纯栅格组形态」由下面的 reason/suspected
+  //   断言继续覆盖；强证据正对照移到 E1A-b（带切片文档）。
+  ok('★ 核心修复回归：无切片文档中纯 raster 组不再判 merged（合作方按钮组反例）',
+    byName(ir, 'QA纯栅组').merged === false,
+    `merged=${byName(ir, 'QA纯栅组').merged}`);
+  ok('★ 弱信号档：纯 raster 组发 SUSPECTED_MERGED_GROUP 疑似提示（恰好 1 条）',
+    warnCodes(ir, 'SUSPECTED_MERGED_GROUP').length === 1
+    && warnCodes(ir, 'SUSPECTED_MERGED_GROUP')[0].layer === byName(ir, 'QA纯栅组').id,
+    JSON.stringify(warnCodes(ir, 'SUSPECTED_MERGED_GROUP')));
+  ok('弱信号档形态判定保留：reason 仍识别「全栅格无切片」形态',
+    (warnCodes(ir, 'SUSPECTED_MERGED_GROUP')[0].lost_info || {}).reason === 'all_raster_subtree_without_slice');
+  ok('无切片文档不产出 MERGED_LAYER_GROUP 强告警',
+    warnCodes(ir, 'MERGED_LAYER_GROUP').length === 0,
+    `warns=${warnCodes(ir, 'MERGED_LAYER_GROUP').length}`);
+  ok('疑似档不要求人工确认（info 级，与强证据档的关键区别）',
+    warnCodes(ir, 'SUSPECTED_MERGED_GROUP')[0].lost_info.requiresHumanConfirm === false);
+}
+
+console.log('\n=== QA3-E1A-b. ★ UPSTREAM-FIX-1 强证据正对照：文档有切片时纯 raster 组必须判 merged ===');
+{
+  // 文档有切片（切片挂在组外的顶层 raster 上）时，
+  // 「整棵子树无切片的纯栅格组」才是异常信号 -> 强证据档 -> merged=true
+  const irStrong = roundtrip('qa-strong-sliced', [
+    group('QA纯栅组', [raster('QA栅格A', 0, 0, 30, 30), raster('QA栅格B', 40, 40, 30, 30)]),
+    raster('QA顶层带切片', 200, 0, 20, 20),
+  ], 'structure', {
+    slices: [{ name: 'QA顶层带切片', type: 'image', groupName: 'QA', rect: { x: 200, y: 0, w: 20, h: 20 } }],
+  });
+  ok('强证据正对照：文档有切片 + 本组无切片 -> merged=true（检测器没坏）',
+    byName(irStrong, 'QA纯栅组').merged === true
+    && warnCodes(irStrong, 'MERGED_LAYER_GROUP')
+      .some((w) => w.layer === byName(irStrong, 'QA纯栅组').id),
+    `merged=${byName(irStrong, 'QA纯栅组').merged} `
+    + `warns=${warnCodes(irStrong, 'MERGED_LAYER_GROUP').length}`);
+  ok('强证据档要求人工确认（契约不变）',
+    warnCodes(irStrong, 'MERGED_LAYER_GROUP')[0].lost_info.requiresHumanConfirm === true);
+  ok('带切片顶层不进疑似档（has_slice 豁免）',
+    warnCodes(irStrong, 'SUSPECTED_MERGED_GROUP').length === 0);
 }
 
 console.log('\n=== QA3-E1B. 独立验证位深与变换矩阵落 IR ===');

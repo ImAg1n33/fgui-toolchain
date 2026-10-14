@@ -144,8 +144,10 @@ test('★ 无切片畸形树: 全量对账（含 MERGED 预测）', () => {
     `★ 交叉对账不一致：\n${mismatches.join('\n')}`);
 
   // 对账覆盖的告警码都应真实出现（否则本测试是空转）
+  // ★ UPSTREAM-FIX-1：无切片树上「全 raster 组」不再报 MERGED_LAYER_GROUP，
+  //   改为 SUSPECTED_MERGED_GROUP（弱信号 info 档）
   const codes = new Set(ir.warnings.map((w) => w.code));
-  for (const expected of ['EMPTY_GROUP', 'EMPTY_LAYER', 'GROUP_BBOX_UNRESOLVED', 'TRANSFORMED_LAYER', 'MERGED_LAYER_GROUP', 'NO_SLICE']) {
+  for (const expected of ['EMPTY_GROUP', 'EMPTY_LAYER', 'GROUP_BBOX_UNRESOLVED', 'TRANSFORMED_LAYER', 'SUSPECTED_MERGED_GROUP', 'NO_SLICE']) {
     assert.ok(codes.has(expected), `fixture 应触发 ${expected}（否则对账是空转）`);
   }
 });
@@ -290,9 +292,11 @@ test('参考实现自检: 空组/全跳过组/嵌套穿透的手算期望值', (
   assert.equal(byName.get('叶子').depth, 2);
   assert.equal(byName.get('内层').parentKey, '/嵌套#0');
   assert.equal(byName.get('叶子').parentKey, '/嵌套#0/内层#0');
-  // 告警预测：空组 → EMPTY_GROUP；两个组子树全 raster → MERGED×2；无切片 → 文档级 NO_SLICE
+  // 告警预测：空组 → EMPTY_GROUP；两个组子树全 raster → 疑似合并×2
+  //（★ UPSTREAM-FIX-1：无切片文档只发 SUSPECTED_MERGED_GROUP，不再判 merged）；
+  // 无切片 → 文档级 NO_SLICE
   const codes = ref.warnings.map((w) => w.code).sort();
-  assert.deepEqual(codes, ['EMPTY_GROUP', 'MERGED_LAYER_GROUP', 'MERGED_LAYER_GROUP']);
+  assert.deepEqual(codes, ['EMPTY_GROUP', 'SUSPECTED_MERGED_GROUP', 'SUSPECTED_MERGED_GROUP']);
   assert.deepEqual(ref.docWarnings, ['NO_SLICE']);
 });
 

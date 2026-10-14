@@ -23,9 +23,12 @@
  * 覆盖范围与边界（诚实声明）：
  *   · 覆盖：扁平化（父子/深度/类型）、叶子 bbox、**组 bbox 递归并集**、
  *     EMPTY_GROUP / EMPTY_LAYER / GROUP_BBOX_UNRESOLVED / TRANSFORMED_LAYER /
- *     MERGED_LAYER_GROUP（仅无切片树）/ NO_SLICE 告警预测；
+ *     合并组告警（两档语义：文档有切片 -> MERGED_LAYER_GROUP（仅强证据档）/
+ *     无切片 -> SUSPECTED_MERGED_GROUP 疑似档；含切片树上的
+ *     MERGED_LAYER_GROUP 对账仍被 skip，因切片归属是另一套算法）/ NO_SLICE
+ *     告警预测；
  *   · 不覆盖：切片归属分配（assignSlicesToLayers，另一套算法，属 L1 通道）、
- *     pHash 数值（L3 兜底，与结构无关）。含切片的树上跳过 MERGED 对账。
+ *     pHash 数值（L3 兜底，与结构无关）。
  * ════════════════════════════════════════════════════════════════════════════
  */
 
@@ -125,6 +128,13 @@ function referenceBuildIr(psd, opts = {}) {
   const layers = [];
   const warnings = [];
 
+  // ★ UPSTREAM-FIX-1：文档切片总数决定「无切片」信号是强证据还是常态 ★
+  //   与被测实现（ir-builder 的 docHasSlices = slices.length > 0）同一份文字定义，
+  //   但此处从 psd.imageResources 独立统计（不 import src）。
+  const docSliceCount = ((psd.imageResources && psd.imageResources.slices) || [])
+    .reduce((n, grp) => n + ((grp.slices || []).length), 0);
+  const docHasSlices = docSliceCount > 0;
+
   /**
    * 递归遍历（建嵌套路径 key：父路径/名字#同名序号）。
    * @param {Object[]} siblings
@@ -173,12 +183,18 @@ function referenceBuildIr(psd, opts = {}) {
       }
 
       if (type === 'group' && childCount > 0) {
-        // merged 预测（无切片树）：子树叶子全 raster、无 text、无 smartobject
+        // 合并组预测（两档语义，与 merged-detect.js 的文字定义独立实现）：
+        //   子树叶子全 raster、无 text、无 smartobject 时：
+        //   - 文档有切片 -> 强证据 -> MERGED_LAYER_GROUP
+        //   - 文档无切片 -> 弱信号（常态） -> SUSPECTED_MERGED_GROUP（info 级）
         const leaves = refLeaves(layer);
         const hasText = leaves.some((l) => refType(l) === 'text');
         const hasSmart = leaves.some((l) => refType(l) === 'smartobject');
         if (leaves.length > 0 && !hasText && !hasSmart) {
-          warnings.push({ code: 'MERGED_LAYER_GROUP', layer: key });
+          warnings.push({
+            code: docHasSlices ? 'MERGED_LAYER_GROUP' : 'SUSPECTED_MERGED_GROUP',
+            layer: key,
+          });
         }
         walk(layer.children, key, key, depth + 1);
       }

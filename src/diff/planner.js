@@ -95,6 +95,10 @@ function buildChangePlan(args) {
   const byId = new Map([...baseLayers, ...targetLayers].map((l) => [l.id, l]));
 
   // 每个图层的 merged 归属（跨两侧查父链）
+  // ★ UPSTREAM-FIX-1：merged=true 现在只可能来自「强证据」档（文档有切片 &&
+  //   纯栅格无切片子树）。无切片文档的疑似组（SUSPECTED_MERGED_GROUP）不会
+  //   在 IR 里标 merged，因此本处的 L3 封顶 / INFERRED 联动天然只对强证据
+  //   生效 —— suspected 不触发任何联动，无需在本文件另设开关。
   const mergedGroupName = new Map();
   for (const l of [...baseLayers, ...targetLayers]) {
     let cur = l;

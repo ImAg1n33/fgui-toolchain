@@ -23,7 +23,7 @@
 const { normalizeName } = require('../core/normalize');
 const { round6, sortBy } = require('../core/determinism');
 const { extractText, isTextLayer } = require('./text-extract');
-const { detectMerged, buildMergedWarning, isGroup } = require('./merged-detect');
+const { detectMerged, buildMergedWarning, buildSuspectedMergedWarning, isGroup } = require('./merged-detect');
 const { assignSlicesToLayers, buildSliceSection } = require('./slice-extract');
 const { layerImageData } = require('./reader');
 const { phashFromRgba } = require('../imaging/phash');
@@ -424,16 +424,28 @@ class IrBuilder {
     const sliceSection = buildSliceSection(slices, assignment);
     warnings.push(...sliceSection.warnings);
 
-    // ---- 第 3 遍：合并图层标记（R2-F5）----
-    // 必须**在切片归属之后**做：判据③要求「子树里没有任何图层携带 slice」。
+    // ---- 第 3 遍：合并图层标记（R2-F5 + ★ UPSTREAM-FIX-1 两档语义 ★）----
+    // 必须在切片归属之后做：判据要求「子树里没有任何图层携带 slice」。
+    //
+    // ★ docHasSlices 是「无切片」信号有无判别力的分水岭 ★：
+    //   - 文档有切片 -> 纯栅格无切片组是异常信号 -> merged=true（强证据，
+    //     触发 planner/matcher 的 L3 封顶与 INFERRED 联动）；
+    //   - 文档没有切片 -> 「无切片」是常态（画师导出后往往不保存切片），
+    //     绝不标 merged（不触发任何联动），只发 SUSPECTED_MERGED_GROUP
+    //     info 级提示。否则无切片 PSD 里的普通分层组会被大面积误判，
+    //     人工确认量暴涨（外部审查核实的问题一）。
+    const docHasSlices = slices.length > 0;
     const byId = new Map(flat.map((l) => [l.id, l]));
     for (const node of flat) {
       if (node.type !== 'group' || node.childCount === 0) continue;
       const pseudoLayer = this.rebuildForDetect(node, byId);
-      const info = detectMerged(pseudoLayer, { sliceByLayerIndex });
+      const info = detectMerged(pseudoLayer, { sliceByLayerIndex, docHasSlices });
       if (info.merged) {
         node.merged = true;
         warnings.push(buildMergedWarning(node, info));
+      } else if (info.suspected) {
+        // 疑似档：不动 node.merged（保持 false），只发 info 级提示
+        warnings.push(buildSuspectedMergedWarning(node, info));
       }
     }
 
@@ -446,7 +458,9 @@ class IrBuilder {
     return {
       version: IR_VERSION,
       _comment: '由 fgui-rb psd-ir 生成。bbox 为绝对坐标，单位 px。'
-        + 'merged=true 表示画师已合并该组，子层信息不可恢复。'
+        + 'merged=true 表示画师已合并该组，子层信息不可恢复（仅强证据档：'
+        + '文档有切片时纯栅格无切片组才标 merged；无切片文档只发 '
+        + 'SUSPECTED_MERGED_GROUP info 提示，不标 merged）。'
         + '本文件可手工编辑，后续 diff-plan 会读取它。',
       _bboxNote: '组图层的 bbox 一律由其子层并集推导（bboxSource="derived"）；'
         + 'ag-psd 返回的组自身坐标在实测中恒为 0，不可直接采信（ARCHITECTURE D3 / 坑 2）。'
@@ -461,7 +475,8 @@ class IrBuilder {
         bboxSource: 'own = 图层自身坐标；derived = 子层并集推导（仅 group）',
         opacity: '0..1，定点化到 6 位',
         visible: 'false 表示画师隐藏了该层',
-        merged: 'true = 该组被画师合并，子层信息不可恢复（R2-F5）',
+        merged: 'true = 该组被画师合并，子层信息不可恢复（R2-F5；仅强证据档：'
+          + '文档有切片时才判，无切片文档的疑似组不标此字段）',
         childCount: '直接子层数',
         sliceName: '导出的切片名（L1 最强匹配通道的依据），无则 null',
         text: 'type=text 时为 {value,fontSize,color,align,font}；color 恒为 6 位 #RRGGBB',

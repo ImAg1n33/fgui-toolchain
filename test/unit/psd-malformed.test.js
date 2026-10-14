@@ -249,9 +249,15 @@ test('智能对象: 正确识别类型 + bbox 正确 + 不进 merged + pHash 正
     `智能对象层应算出 pHash，实际: ${node.phash}`);
 
   // merged-detect：含智能对象的组不算 merged（智能对象保留独立身份）
+  // ★ UPSTREAM-FIX-1：无切片文档里全 raster 组降级为 SUSPECTED_MERGED_GROUP，
+  //   含智能对象的组连疑似档都不该进（两种豁免都要断言，否则
+  //   qa3-e01-mutation 的 M3 变异（丢 smartObject 标记）抓不到了）
   const g = layerByName(ir, '含智能对象的组');
   assert.equal(g.merged, false, '含智能对象的组不应判 merged');
   assert.equal(warnCodes(ir, 'MERGED_LAYER_GROUP').length, 0);
+  assert.equal(warnCodes(ir, 'SUSPECTED_MERGED_GROUP')
+    .filter((w) => w.layer === g.id).length, 0,
+    '含智能对象的组也不应进疑似档（smartObject 豁免对两档都生效）');
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -543,7 +549,9 @@ test('综合畸形: 所有形态同场，每层有着落、每告警有预期', 
   assert.ok(codes.includes('TRANSFORMED_LAYER'), '旋转智能对象 → TRANSFORMED_LAYER');
   assert.ok(codes.includes('EMPTY_LAYER'), '调整层零尺寸 → EMPTY_LAYER');
   // 变形内容组：含智能对象 → 不判 merged（无 MERGED_LAYER_GROUP）
+  // ★ UPSTREAM-FIX-1：也不应进疑似档（SUSPECTED_MERGED_GROUP）
   assert.ok(!codes.includes('MERGED_LAYER_GROUP'), '含智能对象的组不应判 merged');
+  assert.ok(!codes.includes('SUSPECTED_MERGED_GROUP'), '含智能对象的组也不应进疑似档');
 
   // ④ 组 bbox：由两个子层并集推导（智能对象 40,60,100x60 ∪ 剪贴层 50,70,70x40）
   const g = layerByName(ir, '变形内容组');

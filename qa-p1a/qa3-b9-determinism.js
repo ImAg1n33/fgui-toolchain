@@ -113,9 +113,15 @@ console.log('\n=== QA3-B2. 3 次运行到 3 个不同目录（固定 --now）===
 
 console.log('\n=== QA3-B3. 与工程师报告 §13.7 的声称值对比 ===');
 {
+  // ★ UPSTREAM-FIX-1 基线更新（改测试要被看见）★
+  //   旧声称值（53b15863…/00edebd7…）对应修复前的 IR：修复后 design_ir 的
+  //   _comment/_layerFieldNote.merged 文案更新、无切片文档告警语义变化，
+  //   IR 产物内容随之合法变更 —— md5 基线同步刷新，并保留新旧对照以供溯源。
+  //   确定性本身（3 次运行逐字节一致）由 QA3-B2 独立保证，不受基线刷新影响。
   const CLAIMED = {
-    'design_ir.A.json': '53b15863e7346df11d2d5ee5050ae880',
-    'design_ir.B.json': '00edebd75e10406166757fc9364fa9cb',
+    // 旧基线（UPSTREAM-FIX-1 之前）：A=53b15863e7346df11d2d5ee5050ae880 B=00edebd75e10406166757fc9364fa9cb
+    'design_ir.A.json': 'fd741acb8af4273c8b802bd60bbab7a8',
+    'design_ir.B.json': '6b2a80d34243050c02b7029b11dcbdf2',
     'change_plan.json': '27279d2fad69ad1274bf86c58ff091f3',
     'map.json': '83c8ef6a4827076dffa3dbc5d94a2f32',
   };
