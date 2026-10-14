@@ -12,11 +12,16 @@
  * | L4 | 均不命中 | 判 `INFERRED`，进人工确认队列，**默认 skip 而非猜测** |
  *
  * ★ merged 组的三条硬规则（ARCHITECTURE §4.6 / PRD K4）★
- *   1. `merged=true` 的组内节点只允许 L3 匹配，**不允许 L1/L2** ——
- *      因为被合并的组里已经没有分层信息了，切片名与图层名都是画师重命名的产物，
- *      拿它们当证据等于自欺欺人。
- *   2. L3 命中后 `confidence` **强制封顶 0.5**。
- *   3. 匹配失败一律 L4 → INFERRED，`defaultIfUnconfirmed='skip'`。
+ *   1. merged=true 的组内节点只允许 L3 匹配，不允许 L1/L2。
+ *   2. 命中后 confidence 强制封顶 0.5。
+ *   3. 匹配失败一律 L4 -> INFERRED，defaultIfUnconfirmed='skip'。
+ *
+ * ★ UPSTREAM-FIX-3：身份加作用域（跨 PSD 节点 ID 碰撞）★
+ *   base 与 target 的图层 id 各自从 L001 独立编号，**必然碰撞**。
+ *   旧实现把两份图层放进同一张 byId（target 覆盖 base），merged 父链爬升
+ *   会走错侧的父节点（base 的 L002 查到 target 的 L001）。现在按侧建表
+ *   （baseById/targetById），under* 表用 `base:${id}` / `target:${id}`
+ *   作用域键 —— **绝不把两份图层放进同一张以局部 id 为键的 Map**。
  *
  * ★ L4 默认 skip 而非猜测 ★（PRD K4 第②条 / ARCHITECTURE 决策 9）：
  *   宁可少做一个节点让人补，也不要错一个。INFERRED 项在未确认前不写入 XML。
@@ -31,23 +36,37 @@ const { searchAssets } = require('../assets/search');
 const LEVEL = Object.freeze({ L1: 'L1', L2: 'L2', L3: 'L3', L4: 'L4' });
 
 /**
- * 判断某个图层是否位于 merged 组内（沿 parent 链向上找）。
+ * 判断某个图层是否位于携带指定标记（merged / suspectedMerged）的组内
+ * （沿 parent 链向上找，**只在传入的同一份 byId 内爬** —— 调用方必须保证
+ * byId 是单侧的图层表，跨侧合并表会因 ID 碰撞走错父链）。
  *
  * @param {Object} layer IR 层节点
- * @param {Map<string,Object>} byId
+ * @param {Map<string,Object>} byId 单侧的 id -> layer 表
+ * @param {string} [flag='merged'] 组节点上参与判定的字段名
  * @returns {boolean}
  */
-function isUnderMerged(layer, byId) {
+function isUnderFlag(layer, byId, flag = 'merged') {
   let cur = layer;
   const seen = new Set();
   while (cur && cur.parent && !seen.has(cur.id)) {
     seen.add(cur.id);
     const parent = byId.get(cur.parent);
     if (!parent) return false;
-    if (parent.merged) return true;
+    if (parent[flag]) return true;
     cur = parent;
   }
   return false;
+}
+
+/**
+ * 判断某个图层是否位于 merged 组内（isUnderFlag 的 merged 便捷封装）。
+ *
+ * @param {Object} layer IR 层节点
+ * @param {Map<string,Object>} byId 单侧的 id -> layer 表
+ * @returns {boolean}
+ */
+function isUnderMerged(layer, byId) {
+  return isUnderFlag(layer, byId, 'merged');
 }
 
 /**
@@ -178,17 +197,42 @@ function matchLayers(args) {
   const l4Confidence = cfg.l4Confidence === undefined ? 0.15 : cfg.l4Confidence;
 
   const allLayers = [...args.baseLayers, ...args.targetLayers];
-  const byId = new Map(allLayers.map((l) => [l.id, l]));
 
-  // 标记每个图层是否在 merged 组内 + 是否本身是组
-  const underMerged = new Map();
-  for (const l of allLayers) underMerged.set(l.id, isUnderMerged(l, byId));
+  // ★★ UPSTREAM-FIX-3：按侧建表，绝不用一张合并 Map ★★
+  //   两份 PSD 的 id 各自从 L001 独立编号必然碰撞；merged/suspected 的父链
+  //   爬升必须走**本侧**的父节点。under* 表用 `base:${id}` / `target:${id}`
+  //   作用域键，两个方向互不污染。
+  const baseById = new Map(args.baseLayers.map((l) => [l.id, l]));
+  const targetById = new Map(args.targetLayers.map((l) => [l.id, l]));
+
+  /**
+   * 计算单侧每个图层的「位于 merged/suspected 组内」标记（作用域键）。
+   * @param {Object[]} layers 单侧图层
+   * @param {Map<string,Object>} byIdSide 单侧查表
+   * @param {string} side 'base' | 'target'
+   * @returns {Map<string,boolean>}
+   */
+  const computeUnder = (layers, byIdSide, side) => {
+    const out = new Map();
+    for (const l of layers) {
+      out.set(`${side}:${l.id}`,
+        isUnderMerged(l, byIdSide) || isUnderFlag(l, byIdSide, 'suspectedMerged'));
+    }
+    return out;
+  };
+  // 标记每个图层是否在 merged/suspected 组内（含两侧；键带作用域前缀）
+  const underMerged = new Map([
+    ...computeUnder(args.baseLayers, baseById, 'base'),
+    ...computeUnder(args.targetLayers, targetById, 'target'),
+  ]);
 
   const pairs = [];
   const usedTarget = new Set();
 
   /**
    * 尝试配对。
+   *
+   *
    * @param {Object} base
    * @param {Object} target
    * @param {string} level
@@ -197,16 +241,15 @@ function matchLayers(args) {
    * @param {Object} [extra]
    */
   const take = (base, target, level, confidence, evidence, extra) => {
+    const suspect = underMerged.get(`base:${base.id}`) || underMerged.get(`target:${target.id}`);
     let conf = confidence;
-    const merged = underMerged.get(base.id) || underMerged.get(target.id);
-    // ★ merged 组内节点的置信度强制封顶（无论哪一级）
-    if (merged) conf = Math.min(conf, mergedCap);
+    if (suspect) conf = Math.min(conf, mergedCap);
     pairs.push({
       baseId: base.id,
       targetId: target.id,
       level,
       confidence: round6(conf),
-      underMerged: !!merged,
+      underMerged: !!suspect,
       evidence,
       ...(extra || {}),
     });
@@ -216,7 +259,6 @@ function matchLayers(args) {
   const claimable = (l) => l.type !== 'group';
 
   // ================= L1：slice 名完全一致 =================
-  // merged 组内节点不走 L1（见文件头规则 1）
   const bySlice = new Map();
   for (const t of args.targetLayers) {
     if (!claimable(t) || !t.sliceName) continue;
@@ -225,7 +267,7 @@ function matchLayers(args) {
   }
   for (const b of args.baseLayers) {
     if (!claimable(b) || !b.sliceName) continue;
-    if (underMerged.get(b.id)) continue;
+    if (underMerged.get('base:' + b.id)) continue;
     const cands = bySlice.get(b.sliceName) || [];
     const hit = cands.find((t) => !usedTarget.has(t.id));
     if (!hit) continue;
@@ -249,7 +291,7 @@ function matchLayers(args) {
   for (const b of args.baseLayers) {
     if (!claimable(b) || !b.normName) continue;
     if (usedTarget.size && pairs.some((p) => p.baseId === b.id)) continue;
-    if (underMerged.get(b.id)) continue;
+    if (underMerged.get('base:' + b.id)) continue;
     const cands = (byNorm.get(b.normName) || []).filter((t) => !usedTarget.has(t.id));
     if (!cands.length) continue;
     // 同名多候选：优先尺寸吻合的；仍多个则取 id 最小的（确定性），并降置信度 + 标 AMBIGUOUS
@@ -300,15 +342,15 @@ function matchLayers(args) {
   for (const cp of candPairs) {
     if (takenBase.has(cp.b.id) || usedTarget.has(cp.t.id)) continue;
     takenBase.add(cp.b.id);
-    const merged = underMerged.get(cp.b.id) || underMerged.get(cp.t.id);
-    // merged 组内只允许 L3，且封顶 0.5 —— take() 里已统一封顶
+    const suspect = underMerged.get(`base:${cp.b.id}`) || underMerged.get(`target:${cp.t.id}`);
     take(cp.b, cp.t, LEVEL.L3, cp.sim.score,
       `L3 视觉+几何相似：pHash 汉明距离 ${cp.sim.parts.hamming}（<= ${l3Cfg.phashMaxDistance}），`
       + `尺寸 ${cp.b.bbox.w}x${cp.b.bbox.h} vs ${cp.t.bbox.w}x${cp.t.bbox.h}，`
       + `位置 (${cp.b.bbox.x},${cp.b.bbox.y}) vs (${cp.t.bbox.x},${cp.t.bbox.y})，`
       + `加权相似度 ${cp.sim.score}`
-      + (merged
-        ? `；该层位于 merged 组『${findMergedGroupName(cp.b, byId, underMerged)}』内，`
+      + (suspect
+        ? `；该层位于 merged 组『${findMergedGroupName(cp.b, baseById)
+          || findMergedGroupName(cp.t, targetById)}』内，`
           + `按规则置信度封顶 ${mergedCap}`
         : ''),
       { sizeMatched: sameSize(cp.b.bbox, cp.t.bbox, sizeTol), posMatched: samePos(cp.b.bbox, cp.t.bbox, posTol), ...cp.sim.parts });
@@ -329,7 +371,7 @@ function matchLayers(args) {
         phash: b.phash,
         topK: 3,
         config: args.searchConfig,
-        layerMerged: underMerged.get(b.id),
+        layerMerged: underMerged.get(`base:${b.id}`),
       });
       searchNotes.push({ baseId: b.id, certainty: res.certainty, hits: res.hits.length, evidence: res.evidence });
     }
@@ -370,28 +412,29 @@ function matchLayers(args) {
 }
 
 /**
- * 找到某层所属的 merged 组名（用于 evidence 文案）。
+ * 找到某层所属的 merged/suspected 组名（用于 evidence 文案）。
+ * ★ UPSTREAM-FIX-3：byId 必须是该层所属侧的单侧表（跨侧合并表会撞 id）。
  * @param {Object} layer
- * @param {Map<string,Object>} byId
- * @param {Map<string,boolean>} underMerged
- * @returns {string}
+ * @param {Map<string,Object>} byId 单侧 id -> layer
+ * @returns {string} 组名；不在任何 merged/suspected 组内时返回 ''
  */
-function findMergedGroupName(layer, byId, underMerged) {
+function findMergedGroupName(layer, byId) {
   let cur = layer;
   const seen = new Set();
   while (cur && cur.parent && !seen.has(cur.id)) {
     seen.add(cur.id);
     const parent = byId.get(cur.parent);
     if (!parent) break;
-    if (parent.merged) return parent.name;
+    if (parent.merged || parent.suspectedMerged) return parent.name;
     cur = parent;
   }
-  return '(未知)';
+  return '';
 }
 
 module.exports = {
   matchLayers,
   isUnderMerged,
+  isUnderFlag,
   l3Similarity,
   sameSize,
   samePos,

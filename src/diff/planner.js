@@ -85,35 +85,43 @@ function buildChangePlan(args) {
 
   const baseLayers = baseIr.layers || [];
   const targetLayers = targetIr.layers || [];
-  // ★★ 关键：base 与 target 的图层 id 会重复（都是 L001/L002/…），
-  //   绝不能用同一个 byId 查表 —— 否则 classifyPair 会把 target 和它自己比，
-  //   于是所有配对都变成「几何完全一致」→ 全部误判为 REUSE。
-  //   这个 bug 在开发中真实发生过：mail_bg 明明从 480x320 变成 560x360，
-  //   却被判成 REUSE。两侧必须各自建表。
+  // ★★ UPSTREAM-FIX-3：身份加作用域 ★★
+  //   两侧 id 各自从 L001 独立编号必然碰撞。所有跨侧查表必须带作用域：
+  //   - 按侧建 baseById / targetById；
+  //   - merged/suspected 父链爬升按侧各自的表，归属表键为 `base:${id}` / `target:${id}`；
+  //   - **绝不把两份图层放进同一张以局部 id 为键的 Map**（旧合并 byId 会
+  //     让 base 的父链查到 target 的同名节点，merged 归属互相污染）。
   const baseById = new Map(baseLayers.map((l) => [l.id, l]));
   const targetById = new Map(targetLayers.map((l) => [l.id, l]));
-  const byId = new Map([...baseLayers, ...targetLayers].map((l) => [l.id, l]));
 
-  // 每个图层的 merged 归属（跨两侧查父链）
-  // ★ UPSTREAM-FIX-1：merged=true 现在只可能来自「强证据」档（文档有切片 &&
-  //   纯栅格无切片子树）。无切片文档的疑似组（SUSPECTED_MERGED_GROUP）不会
-  //   在 IR 里标 merged，因此本处的 L3 封顶 / INFERRED 联动天然只对强证据
-  //   生效 —— suspected 不触发任何联动，无需在本文件另设开关。
-  const mergedGroupName = new Map();
-  for (const l of [...baseLayers, ...targetLayers]) {
-    let cur = l;
-    const seen = new Set();
-    while (cur && cur.parent && !seen.has(cur.id)) {
-      seen.add(cur.id);
-      const p = byId.get(cur.parent);
-      if (!p) break;
-      if (p.merged) {
-        mergedGroupName.set(l.id, p.name);
-        break;
+  // 每个图层的 merged/suspected 归属（★ 按侧各自爬父链，跨侧查表会撞 id ★）。
+  // ★ UPSTREAM-FIX-4 语义：merged（启发式强判定）与 suspectedMerged（弱信号）
+  //   都只影响**未命中去向**（INFERRED / REMOVE 压置信度），不再影响匹配路径。
+  const mergedGroupName = new Map(); // `${side}:${layerId}` -> 组名
+  /**
+   * 单侧父链爬升：找最近的 merged/suspected 祖先组。
+   * @param {Object[]} layers 单侧图层
+   * @param {Map<string,Object>} byIdSide 单侧查表
+   * @param {string} side 'base' | 'target'
+   */
+  const collectMergedAncestors = (layers, byIdSide, side) => {
+    for (const l of layers) {
+      let cur = l;
+      const seen = new Set();
+      while (cur && cur.parent && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        const p = byIdSide.get(cur.parent);
+        if (!p) break;
+        if (p.merged || p.suspectedMerged) {
+          mergedGroupName.set(`${side}:${l.id}`, p.name);
+          break;
+        }
+        cur = p;
       }
-      cur = p;
     }
-  }
+  };
+  collectMergedAncestors(baseLayers, baseById, 'base');
+  collectMergedAncestors(targetLayers, targetById, 'target');
 
   // ---- 槽位名：优先用 slice 名，其次归一名，最后画师原名 ----
   const slotOf = (layer) => layer.sliceName || layer.normName || layer.name || layer.id;
@@ -153,7 +161,6 @@ function buildChangePlan(args) {
     const parentBox = parentBoxOf(target, 'target');
     const diff = classifyPair(pair, base, target, {
       cfg: cfg.diff,
-      byId,
       slotOf,
       grid9Of,
       relationOf: (b, t) => relationOf(b, t, parentBox),
@@ -165,7 +172,7 @@ function buildChangePlan(args) {
 
   // ---- 未匹配的目标层 -> ADD / INFERRED ----
   for (const target of matched.unmatchedTarget) {
-    const groupName = mergedGroupName.get(target.id);
+    const groupName = mergedGroupName.get(`target:${target.id}`);
     diffs.push(classifyUnmatchedTarget(target, {
       cfg: cfg.diff,
       slotOf,
@@ -178,7 +185,7 @@ function buildChangePlan(args) {
 
   // ---- 未匹配的基准层 -> REMOVE ----
   for (const base of matched.unmatchedBase) {
-    const groupName = mergedGroupName.get(base.id);
+    const groupName = mergedGroupName.get(`base:${base.id}`);
     const d = classifyUnmatchedBase(base, {
       cfg: cfg.diff, slotOf, underMerged: !!groupName, groupName,
     });
@@ -198,7 +205,9 @@ function buildChangePlan(args) {
         confidence: 0.9,
         evidence: `组『${g.name}』在基准态中不存在（bbox 由子层并集推导：`
           + `${g.bbox.x},${g.bbox.y},${g.bbox.w}x${g.bbox.h}）—— 判定为新增容器节点`
-          + (g.merged ? '；⚠ 该组已被画师合并，子层信息不可恢复' : ''),
+          + (g.merged
+            ? '；⚠ 该组已被画师合并（启发式），子层信息不可恢复'
+            : (g.suspectedMerged ? '；⚠ 该组疑似被合并（启发式弱信号），请人工确认' : '')),
         fguiStrategy: { type: 'list', detail: { hint: '若子层为重复结构，参考 structureAdvice 改为 GList' } },
         candidates: [],
         defaultIfUnconfirmed: 'skip',
@@ -227,12 +236,10 @@ function buildChangePlan(args) {
     L3: matched.stats.l3,
     L4: matched.stats.l4,
   };
-  // ★ 统计口径修正 ★
-  //   原先只取 matcher 的 `mergedCapped`（仅统计 L1/L2/L3 的**配对**），
-  //   漏掉了 REMOVE / INFERRED 路径上的封顶 —— 而那两条路径同样会因
-  //   「位于 merged 组内」把置信度压到 0.5。
-  //   于是 summary 报 6、实际封顶 8，**数字与事实不符**（QA 独立验证时发现）。
-  //   现在改为直接从最终 diffs 反算：confidence 恰等于 mergedConfidenceCap 的条目数。
+  // ★ 统计口径 ★
+  //   直接从最终 diffs 反算：confidence 恰等于 mergedConfidenceCap 的条目数。
+  //   （含配对与 REMOVE 路径的封顶，QA 独立验证时修的口径）。
+
   const cap = cfg.diff && cfg.diff.mergedConfidenceCap !== undefined
     ? cfg.diff.mergedConfidenceCap : 0.5;
   summary.mergedConfidenceCapped = sortedDiffs
@@ -259,7 +266,8 @@ function buildChangePlan(args) {
         + '仅靠 node 无法分辨是哪一侧，故同时给出 baseNode',
       baseNode: '基准态 IR 的图层 id。与 node 配对使用',
       matchLevel: 'L1 slice名一致 | L2 归一名全等 | L3 pHash+尺寸+位置 | L4 均未命中',
-      confidence: '0..1。merged 组内的匹配强制封顶 0.5',
+      confidence: '0..1。L1/L2 精确匹配不封顶（匹配成功即证明未合并）；'
+        + 'L3 弱证据命中疑似合并对象、以及疑似合并组内的 REMOVE，封顶 0.5',
       evidence: '人可读的判定依据 —— 复核与推翻的唯一依据，请认真读',
       fguiStrategy: '建议的 FGUI 处理方式；本轮只是建议，P1 才真正生成 XML',
       candidates: 'INFERRED 时的候选切图列表',

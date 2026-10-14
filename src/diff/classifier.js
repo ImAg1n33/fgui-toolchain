@@ -100,9 +100,10 @@ function styleChanged(a, b, opacityDelta) {
  * @param {Object} base 基准层
  * @param {Object} target 目标层
  * @param {Object} ctx
- * @param {Object} ctx.byId id -> layer
  * @param {Object} ctx.cfg diff 配置
- * @param {Object} ctx.grid9Of function(layerId) -> Grid9VerdictResult|null
+ * @param {Function} [ctx.slotOf] layer -> 槽位名
+ * @param {Function} [ctx.grid9Of] layerId -> Grid9VerdictResult|null
+ * @param {Function} [ctx.relationOf] (base, target) -> relation|null
  * @returns {Object} PlanDiff
  */
 function classifyPair(pair, base, target, ctx) {
