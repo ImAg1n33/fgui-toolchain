@@ -77,8 +77,8 @@
   },
 
   "fgui": {
-    "_comment": "P1-a FGUI 契约层 lint 配置（src/fgui/lint-rules.js）。★ 标注 [待确认] 的项依赖外部答案：答案到位后只改本段，不改代码（Q18/Q19/Q2/Q20）。",
-    "displayListTags": ["image", "text", "richtext", "input", "graph", "group", "loader", "list", "component", "movieclip"],
+    "_comment": "P1-a FGUI 契约层 lint 配置（src/fgui/lint-rules.js）。★ displayListTags 依据上游 STANDARDS.md §2.6：合法标签只有 10 种；输入框= text+input=\"true\"、序列帧= <jta/>、3D= loader3D；movieclip 只在 package.xml 登记不上舞台（UPSTREAM-FIX-2）。Q18 仅需确认合作方版本是否有差异，有出入只改本段。标注 [待确认] 的项（Q2/Q20）依赖外部答案：答案到位后只改本段，不改代码。",
+    "displayListTags": ["image", "graph", "loader", "loader3D", "text", "richtext", "list", "component", "jta", "group"],
     "extentionTypes": ["Button", "Label", "ComboBox", "ProgressBar", "Slider", "ScrollBar", "List", "Tree"],
     "pkgIdLength": 8,
     "idPrefixes": ["b", "c"],

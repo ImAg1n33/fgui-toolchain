@@ -72,9 +72,11 @@ function defaultConfig() {
     //   为什么在两处各写一份：§8.6「core 不得 import 上层」，config.js 不能
     //   require fgui/constants.js（与 grid9 阈值同款模式：config.js 与 grid9.js
     //   各一份，determinism.test.js 对账）。
-    //   Q18/Q19/Q2/Q20 答案到位后只改 fgui.config.json 的本段，不改代码。
+    //   Q2/Q20 答案到位后只改 fgui.config.json 的本段，不改代码。
+    //   displayListTags 已依据上游 STANDARDS.md §2.6 落定（UPSTREAM-FIX-2，
+    //   10 种合法标签）；extentionTypes 已核对与上游一致。
     fgui: {
-      displayListTags: ['image', 'text', 'richtext', 'input', 'graph', 'group', 'loader', 'list', 'component', 'movieclip'],
+      displayListTags: ['image', 'graph', 'loader', 'loader3D', 'text', 'richtext', 'list', 'component', 'jta', 'group'],
       extentionTypes: ['Button', 'Label', 'ComboBox', 'ProgressBar', 'Slider', 'ScrollBar', 'List', 'Tree'],
       pkgIdLength: 8,
       idPrefixes: ['b', 'c'],

@@ -5,10 +5,13 @@
  * ════════════════════════════════════════════════════════════════════════════
  * ★ 本文件的设计原则：所有值都是「默认值」，全部可从 fgui.config.json 覆盖 ★
  *
- *   原因：Q18（displayList 合法标签清单）/ Q19（extention 8 种合法值）/
- *         Q2（包 id 是否稳定 8 位）/ Q20（命名禁用词表）**尚未拿到答案**。
- *   猜错的代价是「误拦合法组件」—— 所以默认值取 FairyGUI 通用集合，
- *   答案到位后只改 fgui.config.json 的 fgui 段，**不改本文件、不改任何代码**。
+ *   ★ UPSTREAM-FIX-2（外部审查修复）★：Q18（displayList 合法标签清单）已依据
+ *   上游 STANDARDS.md §2.6 落定 —— 合法标签只有 10 种（image/graph/loader/
+ *   loader3D/text/richtext/list/component/jta/group）；Q19（extention 8 种）
+ *   已核对与上游一致。剩余外部依赖：Q2（包 id 是否稳定 8 位）/
+ *   Q20（命名禁用词表）。
+ *   猜错的代价是「误拦合法组件」—— 所以默认值以已核实的上游规范为准，
+ *   合作方版本如有差异只改 fgui.config.json 的 fgui 段，**不改本文件、不改任何代码**。
  *
  *   与 P0 的 grid9 阈值完全同构（src/imaging/grid9.js 的 DEFAULT_THRESHOLDS
  *   ↔ fgui.config.json 的 grid9 段），由 determinism.test.js 的配置守卫
@@ -24,35 +27,41 @@
 // 一、displayList 合法标签表（R-01 的依据）
 // ════════════════════════════════════════════════════════════════════════════
 //
-// 默认值 = FairyGUI 通用集合（10 种）。这是**假设值**：
-//   Q18 问「displayList 的 10 种合法标签具体是哪 10 个」，尚未确认。
-//   若真实集合与此不同（例如多了 swf / 少了 input），改配置即可：
-//     "fgui": { "displayListTags": ["image", ...] }
+// ★ UPSTREAM-FIX-2：依据上游 STANDARDS.md §2.6（外部审查逐句核对）★
+//   displayList 的合法标签**只有 10 种**。Q18 的剩余疑问仅是「合作方版本
+//   是否与上游有差异」，不再是「这 10 个是什么」—— 如合作方版本确有出入，
+//   仍只改 fgui.config.json 的 fgui 段，不改本文件。
+//
+// 三个高频发明错误（STANDARDS 原文预警，R-01 拦截 + 教正确写法）：
+//   ❌ <inputtext>/<input>  —— 输入框的正确写法是
+//      <text input="true" prompt="请输入"/>（ObjectType 叫 InputText，
+//      但 XML 标签就是 text + input 属性）
+//   ❌ <movieclip>          —— 序列帧动画的正确写法是 <jta src="ui://..."/>；
+//      movieclip 只在 package.xml 里作资源登记标签，**不上舞台**
+//   3D/骨骼内容用 <loader3D/>
 //
 // 对应 GObject 类型：
 //   image     GImage        picture
-//   text      GTextField    文本（静态）
-//   richtext  GRichTextField 富文本
-//   input     GTextInput    输入框
 //   graph     GGraph        几何图形
-//   group     GGroup        分组（逻辑容器，无像素）
 //   loader    GLoader       装载器（动态换图）
+//   loader3D  GLoader3D     3D/骨骼内容装载
+//   text      GTextField    文本（静态；input="true" 时即输入框 GTextInput）
+//   richtext  GRichTextField 富文本
 //   list      GList         列表
 //   component GComponent    嵌套组件引用
-//   movieclip GMovieClip    MovieClip 动画
+//   jta       —             序列帧动画（JTA）
+//   group     GGroup        分组（逻辑容器，无像素）
 const DISPLAY_LIST_TAGS = Object.freeze([
-  'image', 'text', 'richtext', 'input', 'graph', 'group', 'loader', 'list', 'component', 'movieclip',
+  'image', 'graph', 'loader', 'loader3D', 'text', 'richtext', 'list', 'component', 'jta', 'group',
 ]);
 
 // ════════════════════════════════════════════════════════════════════════════
 // 二、extention 合法值表（R-02 的依据）
 // ════════════════════════════════════════════════════════════════════════════
 //
-// 默认值 = 上游 STANDARDS 记录的 8 种。这是**假设值**：
-//   Q19 问「extention 的 8 种合法值」，尚未确认。
-//   ARCHITECTURE §9.3 暂按 Button/Label/ComboBox/ProgressBar/Slider/
-//   ScrollBar/List/Tree 假设；上游 README 的命令参考里 create_component 的
-//   extention 参数举例也是这批。
+// 默认值 = 上游 STANDARDS 记录的 8 种。
+//   ★ UPSTREAM-FIX-2 核对结论：上游与现有值一致
+//   （Button/Label/ComboBox/ProgressBar/Slider/ScrollBar/List/Tree），不改。
 const EXTENTION_TYPES = Object.freeze([
   'Button', 'Label', 'ComboBox', 'ProgressBar', 'Slider', 'ScrollBar', 'List', 'Tree',
 ]);
@@ -99,9 +108,10 @@ const COLOR_HEX8_RE = /^#[0-9a-fA-F]{8}$/;
 //
 // 键名即配置项名，改 fgui.config.json 的 fgui 段即可覆盖，无需改代码。
 const DEFAULT_FGUI_CONFIG = Object.freeze({
-  // R-01：displayList 合法标签（Q18 未确认 → 默认 FairyGUI 通用集合）
+  // R-01：displayList 合法标签（依据上游 STANDARDS.md §2.6；
+  //       Q18 仅需确认合作方版本是否有差异，有出入时改 fgui.config.json）
   displayListTags: DISPLAY_LIST_TAGS,
-  // R-02：extention 合法值（Q19 未确认 → 默认上游 STANDARDS 8 种）
+  // R-02：extention 合法值（依据上游 STANDARDS.md §2.6 核对，与上游一致）
   extentionTypes: EXTENTION_TYPES,
   // R-04：ui:// 包 id 位数（Q2 未确认 → 默认 8）
   pkgIdLength: PKG_ID_LENGTH,

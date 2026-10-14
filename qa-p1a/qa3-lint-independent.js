@@ -166,14 +166,31 @@ console.log('-- R-01 displayList --');
   const { result: r3 } = safeLint(xml3, { resources: MY_RESOURCES });
   ok('R-01 抓到 <swf>', byRule(r3, 'R-01').length === 1);
 
-  // 合法边缘：10 种合法标签全用一遍（含 movieclip/richtext/input/component）→ 0 error
-  const allTags = ['image', 'text', 'richtext', 'input', 'graph', 'group', 'loader', 'list', 'component', 'movieclip']
+  // 合法边缘：10 种合法标签全用一遍 → 0 error
+  // ★ UPSTREAM-FIX-2 语义更新（改测试要被看见）★：旧清单含 input/movieclip，
+  //   依据上游 STANDARDS.md §2.6 这两个**不是**合法舞台标签
+  //   （输入框 = text + input="true"；movieclip 只在 package.xml 登记），
+  //   合法 10 种为 image/graph/loader/loader3D/text/richtext/list/component/jta/group。
+  //   旧断言「input/movieclip 放行」验证的语义由新的违规样本断言（下方）接管。
+  const allTags = ['image', 'graph', 'loader', 'loader3D', 'text', 'richtext', 'list', 'component', 'jta', 'group']
     .map((t, i) => `    <${t} id="b${String(i + 1).padStart(5, '0')}" name="obj_${t}" xy="0,0" size="10,10"/>`)
     .join('\n');
   const legalAll = `<?xml version="1.0"?>\n<component exported="true">\n  <displayList>\n${allTags}\n  </displayList>\n</component>\n`;
   const { result: r4 } = safeLint(legalAll);
   ok('R-01 不误报：10 种合法标签全放行', r4 && byRule(r4, 'R-01').length === 0 && r4.errors.length === 0,
     r4 ? JSON.stringify(r4.errors.map((e) => e.message.slice(0, 50))) : 'crash');
+
+  // ★ UPSTREAM-FIX-2 反向：发明 <input>/<movieclip> 必须被抓，且信息教正确写法
+  for (const [bad, needle] of [['input', 'text input="true"'], ['movieclip', '<jta']]) {
+    const badXml = legalAll.replace(`<image id="b00001"`, `<${bad} id="b00001"`);
+    const { result: rBad } = safeLint(badXml);
+    const hits = rBad ? byRule(rBad, 'R-01') : [];
+    ok(`R-01 抓到发明标签 <${bad}>（STANDARDS §2.6 高频发明错误）`, hits.length === 1,
+      rBad ? JSON.stringify(rBad.errors.map((e) => e.message.slice(0, 60))) : 'crash');
+    ok(`R-01 对 <${bad}> 的信息教正确写法（含 ${needle}）`,
+      hits.length === 1 && hits[0].message.includes(needle),
+      hits.length === 1 ? hits[0].message : 'no hit');
+  }
 }
 
 // ---- R-02：extention ----

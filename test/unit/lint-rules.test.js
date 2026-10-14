@@ -150,6 +150,55 @@ test('R-01: 合法标签不报；<foo> 必报', () => {
   assert.ok(issues[0].line > 0 && issues[0].path.includes('foo'), '应带行号与路径');
 });
 
+// ★ UPSTREAM-FIX-2：displayList 合法标签对齐上游 STANDARDS.md §2.6 ★
+//   合法标签只有 10 种：image/graph/loader/loader3D/text/richtext/list/
+//   component/jta/group。旧表错在含 input/movieclip、缺 jta/loader3D ——
+//   恰好命中 STANDARDS 预警的「高频发明错误」。
+
+test('★ UPSTREAM-FIX-2: <jta> 与 <loader3D> 是合法舞台标签，不报 R-01/R-04', () => {
+  const xml = legalComponentXml().replace(
+    '    <graph id="b00004" name="deco_line" xy="24,64" size="120,2"/>',
+    '    <jta id="b00004" name="fx_sequence" src="ui://abcd1234/reward_icon" xy="24,64" size="48,48"/>\n'
+    + '    <loader3D id="b00006" name="model_3d" url="ui://abcd1234/reward_icon" xy="24,140" size="48,48"/>',
+  );
+  const r = lintComponentXml(xml, { resources: RESOURCES });
+  assert.equal(byRule(r, 'R-01').length, 0,
+    `★ jta/loader3D 是合法舞台标签（STANDARDS §2.6）: ${JSON.stringify(byRule(r, 'R-01'))}`);
+  assert.equal(byRule(r, 'R-04').length, 0,
+    `jta/loader3D 的 ui:// 引用合法: ${JSON.stringify(byRule(r, 'R-04'))}`);
+});
+
+test('★ UPSTREAM-FIX-2: 发明 <input> 必报 R-01，且信息教正确写法 text + input="true"', () => {
+  const { result } = lintSample('R-01-input');
+  const issues = byRule(result, 'R-01');
+  assert.equal(issues.length, 1, `应恰好 1 条 R-01: ${JSON.stringify(issues)}`);
+  assert.equal(issues[0].severity, 'error');
+  // STANDARDS 原文：ObjectType 叫 InputText，但 XML 标签就是 text + input 属性
+  assert.ok(issues[0].message.includes('text input="true"'),
+    `错误信息必须教正确写法（text + input="true"）: ${issues[0].message}`);
+  assert.ok(issues[0].message.includes('InputText'), '应点明 ObjectType 名与 XML 标签名的区别');
+});
+
+test('★ UPSTREAM-FIX-2: 发明 <movieclip> 必报 R-01，且信息教正确写法 <jta>', () => {
+  const { result } = lintSample('R-01-movieclip');
+  const issues = byRule(result, 'R-01');
+  assert.equal(issues.length, 1, `应恰好 1 条 R-01: ${JSON.stringify(issues)}`);
+  assert.equal(issues[0].severity, 'error');
+  // STANDARDS 原文：movieclip 只在 package.xml 里作资源登记标签，不上舞台
+  assert.ok(issues[0].message.includes('<jta'), `错误信息必须教正确写法（<jta/>）: ${issues[0].message}`);
+  assert.ok(issues[0].message.includes('package.xml'), '应说明 movieclip 的真实用途（资源登记，不上舞台）');
+});
+
+test('★ UPSTREAM-FIX-2 契约快照: DISPLAY_LIST_TAGS 与 STANDARDS §2.6 的 10 种标签逐字一致', () => {
+  const { DISPLAY_LIST_TAGS } = require('../../src/fgui/constants');
+  assert.deepEqual([...DISPLAY_LIST_TAGS].sort(), [
+    'component', 'graph', 'group', 'image', 'jta', 'list', 'loader', 'loader3D', 'richtext', 'text',
+  ]);
+  assert.equal(DISPLAY_LIST_TAGS.length, 10, 'STANDARDS §2.6：合法标签只有 10 种');
+  assert.ok(!DISPLAY_LIST_TAGS.includes('input'), '<input> 不是标签（输入框 = text + input 属性）');
+  assert.ok(!DISPLAY_LIST_TAGS.includes('movieclip'), '<movieclip> 不上舞台（只在 package.xml 登记）');
+});
+
 test('R-02: 合法 extention 不报；Foo 必报', () => {
   assert.equal(byRule(lintLegal(), 'R-02').length, 0);
   const { result } = lintSample('R-02');

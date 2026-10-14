@@ -76,6 +76,28 @@ function violationSamples() {
         '    <foo id="b00004"',
       ),
     },
+    // ★ UPSTREAM-FIX-2：STANDARDS §2.6 点名的高频发明错误 ——
+    //   <input> 不是合法标签（输入框 = text + input="true"）
+    'R-01-input': {
+      why: 'displayList 内发明 <input> 标签（正确写法是 text + input="true"）',
+      expect: 'error',
+      needle: 'input="true"',
+      xml: legalComponentXml().replace(
+        '    <text id="b00003"',
+        '    <input id="b00003"',
+      ),
+    },
+    // ★ UPSTREAM-FIX-2：<movieclip> 不上舞台（序列帧动画 = <jta/>，
+    //   movieclip 只在 package.xml 里作资源登记）
+    'R-01-movieclip': {
+      why: 'displayList 内发明 <movieclip> 标签（正确写法是 <jta/>）',
+      expect: 'error',
+      needle: 'jta',
+      xml: legalComponentXml().replace(
+        '    <graph id="b00004"',
+        '    <movieclip id="b00004"',
+      ),
+    },
     'R-02': {
       why: 'extention="Foo" 不是合法扩展类型',
       expect: 'error',

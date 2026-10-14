@@ -12,8 +12,9 @@
  * ★ 每条规则的知识来源（docs/UPSTREAM-README.md 已核实事实）★
  *   R-00 XML 结构合法（可解析 + 根为 component + 无重复属性）
  *       上游：XML 非法如重复属性，编辑器双击会炸错误框；手写 XML 必须先 lint
- *   R-01 displayList 仅允许合法标签    通用集合，Q18 未确认 → 配置驱动
- *   R-02 extention 仅合法值            上游 STANDARDS，Q19 未确认 → 配置驱动
+ *   R-01 displayList 仅允许合法标签    上游 STANDARDS.md §2.6：共 10 种
+ *       （UPSTREAM-FIX-2；高频发明错误 <input>/<movieclip> 拦截并教正确写法）
+ *   R-02 extention 仅合法值            上游 STANDARDS（UPSTREAM-FIX-2 核对一致）→ 配置驱动
  *   R-03 颜色必须 6 位 + alpha 属性     上游实测：#RRGGBBAA 只取后 6 位 → 纯蓝
  *   R-04 ui:// 包 id 位数校验          上游事故：6 位吃 itemId 首字符，Q2 → 配置驱动
  *   R-05 scale9grid 格式 + 图片边界对账 上游 lint 已有；负值 warn（svg 怪癖）
@@ -538,16 +539,38 @@ function checkStructure(ctx) {
 }
 
 // ---- R-01：displayList 仅允许合法标签 ----
+//
+// ★ UPSTREAM-FIX-2：高频发明错误的「教学式」提示 ★
+//   STANDARDS §2.6 点名了两类高频发明错误 —— 光说「不允许」不够，
+//   错误信息必须教用户正确写法（ObjectType 名 ≠ XML 标签名）：
+//     <input>     -> 输入框其实是 <text input="true" prompt="..."/>
+//                    （ObjectType 叫 InputText，但 XML 标签就是 text + input 属性）
+//     <movieclip> -> 序列帧动画其实是 <jta src="ui://..."/>
+//                    （movieclip 只在 package.xml 里作资源登记标签，不上舞台）
+const TAG_FIX_HINTS = Object.freeze({
+  input: '输入框的正确写法是 <text input="true" prompt="请输入"/>'
+    + '（ObjectType 叫 InputText，但 XML 标签就是 text + input 属性）',
+  inputtext: '输入框的正确写法是 <text input="true" prompt="请输入"/>'
+    + '（不存在 <inputtext> 标签：ObjectType 叫 InputText，XML 标签是 text + input 属性）',
+  movieclip: '序列帧动画的正确写法是 <jta src="ui://包id/资源名"/>'
+    + '（movieclip 只在 package.xml 里作资源登记标签，不上舞台）',
+  swf: 'SWF 动画已不被 displayList 支持：请改用 <jta src="ui://包id/资源名"/>',
+});
+
 function checkDisplayListTags(ctx) {
   const issues = [];
   const legal = ctx.cfg.displayListTags;
   for (const dl of findDisplayLists(ctx.parsed.root)) {
     for (const child of dl.children) {
       if (!legal.includes(child.tag)) {
+        const hint = TAG_FIX_HINTS[child.tag];
         issues.push({
           severity: 'error',
           message: `displayList 内不允许 <${child.tag}>：合法标签只有 ${legal.join(' / ')}`
-            + `（配置项 fgui.displayListTags，Q18 答案确认后可调整）。位置：${pathOf(child)}`,
+            + `（依据上游 STANDARDS.md §2.6；配置项 fgui.displayListTags，`
+            + `合作方版本如有差异可调整）`
+            + (hint ? `。${hint}` : '')
+            + `。位置：${pathOf(child)}`,
           line: child.line, col: child.col, node: child, target: child.tag,
         });
       }
@@ -567,7 +590,8 @@ function checkExtention(ctx) {
       issues.push({
         severity: 'error',
         message: `extention="${v}" 不是合法扩展类型：合法值为 ${legal.join(' / ')}`
-          + `（配置项 fgui.extentionTypes，Q19 答案确认后可调整）。位置：${pathOf(node)}`,
+          + `（依据上游 STANDARDS.md §2.6；配置项 fgui.extentionTypes，`
+          + `合作方版本如有差异可调整）。位置：${pathOf(node)}`,
         line: node.line, col: node.col, node, target: v,
       });
     }
