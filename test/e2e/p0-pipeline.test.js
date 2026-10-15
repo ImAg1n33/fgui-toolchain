@@ -510,6 +510,44 @@ test('★ CLI: 日志走 stderr、产物走 stdout（ARCHITECTURE §8.2）', (t)
   }
 });
 
+test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即不触发兜底告警', (t) => {
+  const { resolveTargetPath } = require('../../src/cli/cmd-gen-xml');
+  const rel = 'assets/MailDetail/MailDetail.xml';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-targetpath-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'assets/MailDetail'), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), '<?xml version="1.0" encoding="utf-8"?>\n<component/>\n');
+
+    // (a) 主解析：工程根相对 → 直接命中，且不告警
+    const warned = [];
+    const logger = {
+      warn: (m, d) => warned.push(`${m} ${JSON.stringify(d || {})}`), info: () => {}, error: () => {},
+    };
+    const abs = resolveTargetPath(dir, ROOT, rel, logger);
+    assert.equal(abs, path.resolve(dir, rel), '主解析必须是 path.resolve(projectRoot, target.file)');
+    assert.deepEqual(warned, [], '工程根命中时不得触发兜底告警');
+
+    // (b) 兜底：工程根拼不到 → 退化 rootDir，且必须告警（绝不静默换基准）
+    const fallbackRel = 'test/fixtures/fgui-project/assets/MailDetail/MailDetail.xml';
+    if (!fs.existsSync(path.join(ROOT, fallbackRel))) return t.skip('fixture 未生成');
+    const warned2 = [];
+    const logger2 = {
+      warn: (m) => warned2.push(String(m)), info: () => {}, error: () => {},
+    };
+    const abs2 = resolveTargetPath(dir, ROOT, fallbackRel, logger2);
+    assert.equal(abs2, path.resolve(ROOT, fallbackRel));
+    assert.ok(warned2.some((w) => /rootDir/.test(w)), '兜底命中必须 stderr 告警');
+
+    // (c) outside-root/ 形态直接拒绝，不猜
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, 'outside-root/MailDetail.xml', logger),
+      (err) => err.code === 'USAGE' && err.exitCode === EXIT.USAGE,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('CLI: gen-xml 三阶段分发（usage 分支）', () => {
   // 无阶段参数 → 打印用法 + EXIT.USAGE；stdout 仍是纯 JSON
   const r1 = runCliJson(['gen-xml']);
@@ -523,6 +561,12 @@ test('CLI: gen-xml 三阶段分发（usage 分支）', () => {
   assert.equal(r2.code, EXIT.USAGE);
   assert.equal(r2.json.ok, false);
   assert.ok(/--plan/.test(r2.json.error), '错误信息应指明缺 --plan');
+
+  // dryrun 缺 --gen-plan → EXIT.USAGE；stdout 仍是纯 JSON
+  const r3 = runCliJson(['gen-xml', 'dryrun']);
+  assert.equal(r3.code, EXIT.USAGE);
+  assert.equal(r3.json.ok, false);
+  assert.ok(/--gen-plan/.test(r3.json.error), '错误信息应指明缺 --gen-plan');
 });
 
 test('CLI: psd-ir 支持多份一次解析（R2-F7）', (t) => {

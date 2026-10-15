@@ -102,11 +102,15 @@ function requireProjectRoot(ctx) {
 /**
  * 把 project_index 里的相对 `file` 解析成绝对路径。
  *
- * ★ read-researcher 缺口 1 ★：project_index 的 `file` 是相对「生成索引时的
- *   CLI rootDir」的相对路径。正常流程里 project-index 以工程根为 root 生成，
- *   故优先按 `--project` 工程根拼；若不存在则退化按本次 CLI 的 rootDir 拼
- *   （索引可能是在别处生成的）—— 两种都找不到 → USAGE（不猜）。
- *   `outside-root/` 降级形态直接拒绝（B9：不含绝对路径信息，无法定位）。
+ * ★ 契约（A3-0b 已与第 3 步工程师对齐）★
+ *   `genPlan.target.file` 是 **FGUI 工程根相对** 路径（如 `assets/MailDetail/MailDetail.xml`），
+ *   因此**主解析必须是** `path.resolve(projectRoot, relFile)` —— 正常路径下必须直接命中，
+ *   **不触发兜底告警**。
+ *
+ * ★ 兜底只作最后手段 ★
+ *   若索引是在别处生成的（file 相对的是生成索引时的 rootDir），工程根拼不出，
+ *   才退化按本次 CLI 的 `--root` 拼，且**命中时必须 stderr 告警**（绝不静默换基准）。
+ *   两者都不存在 → USAGE(2)。`outside-root/` 形态直接拒绝，不猜。
  *
  * @param {string} projectRoot
  * @param {string} rootDir
@@ -515,4 +519,4 @@ function run(ctx) {
   }
 }
 
-module.exports = { run };
+module.exports = { run, resolveTargetPath };
