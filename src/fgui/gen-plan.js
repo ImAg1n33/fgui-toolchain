@@ -20,6 +20,7 @@
 
 const crypto = require('crypto');
 const { AppError, CODES, EXIT } = require('../core/errors');
+const { round6 } = require('../core/determinism');
 // ⚠ 偏差说明：team-lead 消息说「退出码用 src/fgui/constants.js 里的 EXIT」，
 //    但 constants.js 并不导出 EXIT（校验过 exports 列表）—— EXIT 定义在
 //    src/core/errors.js。此处按实际契约从 core/errors 取。
@@ -203,13 +204,20 @@ function buildGenPlan(args = {}) {
   const target = components.find((c) => c && c.pkg === task.targetPkg && c.name === task.name) || null;
   const file = target ? target.file : null;
   const content = file && typeof targetContents[file] === 'string' ? targetContents[file] : null;
-  if (target && content === null) {
+  if (!target) {
+    // 目标组件找不到：不是「静默跳过」，而是明确告警（后续节点匹配必然全零命中）
+    warnings.push({
+      code: 'TARGET_COMPONENT_NOT_FOUND',
+      msg: `project_index.components 里找不到 pkg='${task.targetPkg}' name='${task.name}' 的目标组件`
+        + ' —— 节点匹配将全部零命中，请核对 --index 与 change_plan.task',
+    });
+  } else if (content === null) {
     warnings.push({
       code: 'TARGET_CONTENT_MISSING',
       msg: `目标文件 ${file} 的内容未随 targetContents 传入 —— 节点匹配将全部零命中（请检查 CLI 读取）`,
     });
   }
-  const nodeIndex = buildNodeIndex(content);
+  const nodeIndex = file === null ? { nodes: [], parseError: null } : buildNodeIndex(content);
   if (nodeIndex.parseError) {
     warnings.push({
       code: 'TARGET_PARSE_FAILED',
@@ -220,6 +228,8 @@ function buildGenPlan(args = {}) {
   // ────────────────────────────────────────────────────────────────────────
   // ③ op → 补丁指令（§5），blocked/skipped 永不静默
   // ────────────────────────────────────────────────────────────────────────
+  // id 分配器：per 目标文件、per 前缀（ADD 按 entries 顺序依次分配，不碰撞）
+  const ids = createIdAllocator(nodeIndex.nodes);
   const entries = keptDiffs.map((diff) => classifyDiff({
     diff,
     nodes: nodeIndex.nodes,
@@ -228,6 +238,7 @@ function buildGenPlan(args = {}) {
     targetPkg: task.targetPkg,
     pkgId: resolvePkgId(projectIndex, task.targetPkg),
     projectIndex,
+    ids,
     warnings,
   }));
 
@@ -366,6 +377,9 @@ function bboxToSize(bbox) {
   return bbox ? `${bbox.w},${bbox.h}` : null;
 }
 
+/** M2 已知的 op 集合（其余一律 blocked，不静默）。 */
+const KNOWN_OPS = Object.freeze(['REUSE', 'MOVE', 'RESIZE', 'RESTYLE', 'ADD', 'REMOVE', 'INFERRED']);
+
 /**
  * 处理一个 diff 条目 → gen_plan entry（§4 形态）。
  *
@@ -377,7 +391,7 @@ function bboxToSize(bbox) {
  * @param {string} a.targetPkg
  * @param {string|null} a.pkgId
  * @param {Object} a.projectIndex
- * @param {Object} a.ids id 分配器（block 3 注入）
+ * @param {Object} a.ids id 分配器
  * @param {Object[]} a.warnings 收集器
  * @returns {Object} entry
  */
@@ -397,8 +411,26 @@ function classifyDiff(a) {
     note: '',
   };
 
+  // ★ 未知 op 先拦：连节点都无从匹配，必须立刻 blocked（不静默）★
+  if (!KNOWN_OPS.includes(op)) {
+    entry.status = STATUS.BLOCKED;
+    entry.note = `未知 op ${JSON.stringify(op)} —— 照实记录但无法生成补丁，请人工核对 change_plan.json`;
+    a.warnings.push({
+      code: 'UNKNOWN_OP', op, slot, node,
+      msg: `未知 op ${JSON.stringify(op)}（slot='${slot}'）—— 已 blocked`,
+    });
+    return entry;
+  }
+
   // ADD 单独分支（需要 id 分配 + 资源解析）
   if (op === 'ADD') return classifyAdd(a, entry);
+
+  // INFERRED 正常已被门禁拦下；此处仅 --skip-unconfirmed 路径可达的兜底
+  if (op === 'INFERRED') {
+    entry.status = STATUS.SKIPPED;
+    entry.note = 'INFERRED 未确认条目（门禁路径外的兜底）—— 已 skipped';
+    return entry;
+  }
 
   // ---- 其余 op 统一走「双名/单名映射」----
   // §5：REMOVE 的候选名只有 [slot]（基准态名），其余用 [slot, baseName]
@@ -521,22 +553,190 @@ function classifyDiff(a) {
     return entry;
   }
 
-  // 未知 op：不静默
+  // 理论上不可达（KNOWN_OPS 已全部处理）—— 留作防御，绝不静默返回半成品
   entry.status = STATUS.BLOCKED;
-  entry.note = `未知 op '${op}' —— 照实记录但无法生成补丁，请人工核对 change_plan.json`;
-  a.warnings.push({ code: 'UNKNOWN_OP', op, slot, node, msg: `未知 op '${op}'（slot='${slot}'）` });
+  entry.note = `内部缺陷：op '${op}' 已知但未被任何分支处理（请上报 gen-plan 实现）`;
+  a.warnings.push({ code: 'OP_UNHANDLED', op, slot, node, msg: `op '${op}' 未被分支处理（内部缺陷）` });
   return entry;
 }
 
 /**
- * ADD 分类（block 3 实现：id 分配 + 资源解析 + 文本/颜色属性）。
+ * 构造 id 分配器（per 目标文件、per 前缀）。
+ *
+ * 规则（M2-SPEC §2「id 分配规则」）：
+ *   · 扫现有 id 匹配 `/^[bc]\d{5}$/`，取该前缀最大值 +1，5 位补零；
+ *   · 嵌套 `<component>` 用 'c'，其余用 'b'；
+ *   · 超 99999 → AppError（不静默回绕）。
+ *
+ * @param {Object[]} nodes 目标组件显示对象
+ * @returns {{next:(prefix?:string)=>string, snapshot:()=>Object}}
+ */
+function createIdAllocator(nodes) {
+  const prefixes = ID_PREFIXES.length ? [...ID_PREFIXES] : ['b', 'c'];
+  const cls = prefixes.join('');
+  const re = new RegExp(`^([${cls}])(\\d{${ID_DIGITS}})$`);
+  const maxByPrefix = {};
+  for (const p of prefixes) maxByPrefix[p] = 0;
+  for (const n of nodes || []) {
+    if (!n || !n.id) continue;
+    const m = re.exec(String(n.id));
+    if (m) maxByPrefix[m[1]] = Math.max(maxByPrefix[m[1]], parseInt(m[2], 10));
+  }
+  const MAX = Math.pow(10, ID_DIGITS) - 1;
+  return {
+    /**
+     * @param {string} [prefix='b']
+     * @returns {string} 新 id
+     */
+    next(prefix) {
+      const p = prefixes.includes(prefix) ? prefix : prefixes[0];
+      maxByPrefix[p] = (maxByPrefix[p] || 0) + 1;
+      if (maxByPrefix[p] > MAX) {
+        throw new AppError(CODES.INTERNAL,
+          `id 序列耗尽：前缀 '${p}' 已超过 ${MAX}（${ID_DIGITS} 位上限）—— 组件过大，需拆分`);
+      }
+      return `${p}${String(maxByPrefix[p]).padStart(ID_DIGITS, '0')}`;
+    },
+    snapshot() {
+      return { ...maxByPrefix };
+    },
+  };
+}
+
+/** IR type → 节点 tag（D3）。smartobject 无对应 tag（blocked）。 */
+const ADD_TAG_BY_TYPE = Object.freeze({ text: 'text', group: 'group', raster: 'image' });
+
+/**
+ * 在目标包的资源里找已登记且 exported 的图片（D3）。
+ * @param {Object} projectIndex
+ * @param {string} targetPkg
+ * @param {string[]} keys 候选名（slot / normName）
+ * @returns {Object|null}
+ */
+function findExportedResource(projectIndex, targetPkg, keys) {
+  const res = Array.isArray(projectIndex && projectIndex.resources) ? projectIndex.resources : [];
+  const wanted = keys.filter((k) => typeof k === 'string' && k.trim());
+  if (!wanted.length) return null;
+  return res.find((r) => r && r.pkg === targetPkg && r.exported
+    && (wanted.includes(r.name) || wanted.includes(String(r.id)))) || null;
+}
+
+/**
+ * ADD 分类（§5 / D3）：target-ir 必需 + 资源已登记 + id 分配。
+ *
+ * blocked 三种情形（永不静默，note 必须可读）：
+ *   · 无 --target-ir（或 node 不在 target-ir）→ 无 bbox/type/text 可依；
+ *   · type=smartobject → 无对应节点类型；
+ *   · image 资源未登记/未 exported → note 含「package.xml」（本工具永不自动改 package.xml）。
+ *
  * @param {Object} a
  * @param {Object} entry
  * @returns {Object}
  */
 function classifyAdd(a, entry) {
-  entry.status = STATUS.BLOCKED;
-  entry.note = 'ADD 处理待实现（内部占位）';
+  const { diff, targetIr, projectIndex, targetPkg, ids, warnings } = a;
+  const layer = irLayerOf(targetIr, entry.node);
+  if (!layer) {
+    entry.status = STATUS.BLOCKED;
+    entry.note = 'ADD 需要 --target-ir（且该条目的 node 必须能在 target-ir 里找到）'
+      + ' —— 否则拿不到 type/bbox/text，无法生成节点';
+    warnings.push({
+      code: 'ADD_NO_TARGET_IR', op: 'ADD', slot: entry.slot, node: entry.node,
+      msg: `ADD 条目 slot='${entry.slot}' 缺少 target-ir 数据，已 blocked`,
+    });
+    return entry;
+  }
+
+  const type = layer.type;
+  if (type === 'smartobject') {
+    entry.status = STATUS.BLOCKED;
+    entry.note = '智能对象（smartobject）没有对应的 FGUI 节点类型 —— 需人工决定展开方式，已 blocked';
+    warnings.push({
+      code: 'ADD_SMARTOBJECT', op: 'ADD', slot: entry.slot, node: entry.node,
+      msg: `ADD 条目 slot='${entry.slot}' 的 IR 类型是 smartobject，无法自动生成，已 blocked`,
+    });
+    return entry;
+  }
+  const tag = ADD_TAG_BY_TYPE[type];
+  if (!tag) {
+    entry.status = STATUS.BLOCKED;
+    entry.note = `IR 类型 '${type}' 无法映射到 FGUI 节点 —— 已 blocked，请人工确认`;
+    warnings.push({
+      code: 'ADD_UNKNOWN_TYPE', op: 'ADD', slot: entry.slot, node: entry.node,
+      msg: `ADD 条目 slot='${entry.slot}' 的 IR 类型 '${type}' 无对应节点，已 blocked`,
+    });
+    return entry;
+  }
+
+  // ---- 图片资源解析（仅 image）----
+  const attrs = {};
+  if (tag === 'image') {
+    const keys = [entry.slot, diff.normName, diff.baseName].filter((k) => typeof k === 'string' && k);
+    const res = findExportedResource(projectIndex, targetPkg, keys);
+    if (!res) {
+      entry.status = STATUS.BLOCKED;
+      entry.note = `图片资源 ${JSON.stringify(keys.filter(Boolean))} 未在目标包 package.xml 中登记/未 exported`
+        + ' —— 需先导入素材并登记 package.xml（本工具**永不自动修改** package.xml，PRD R4-F6），'
+        + '登记后重跑 prepare';
+      warnings.push({
+        code: 'ADD_RESOURCE_NOT_REGISTERED', op: 'ADD', slot: entry.slot, node: entry.node,
+        msg: `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
+      });
+      return entry;
+    }
+    const pkgId = a.pkgId;
+    if (pkgId) {
+      attrs.src = `ui://${pkgId}/${res.id}`;
+    } else {
+      // §9：pkgId 落盘位置未确认时常为 null —— 按包名降级并**显式记录**（不静默）
+      attrs.src = `ui://${targetPkg}/${res.id}`;
+      warnings.push({
+        code: 'PKGID_MISSING', op: 'ADD', slot: entry.slot, node: entry.node,
+        msg: `目标包 '${targetPkg}' 的 pkgId 未解析到（落盘位置未确认，Q3 缺口）——`
+          + ` src 已按包名降级为 ${attrs.src}，请在拿到真实工程副本后核对`,
+      });
+    }
+  }
+
+  // ---- 属性：id / name / xy / size / text / color / alpha ----
+  attrs.id = ids.next(tag === 'component' ? 'c' : 'b');
+  attrs.name = entry.slot;
+  const xy = bboxToXy(layer.bbox);
+  const size = bboxToSize(layer.bbox);
+  if (xy) attrs.xy = xy;
+  if (size) attrs.size = size;
+
+  const notes = [];
+  if (layer.type === 'text' && layer.text && typeof layer.text === 'object') {
+    if (typeof layer.text.value === 'string') attrs.text = layer.text.value;
+    const color = layer.text.color;
+    if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) {
+      attrs.color = color;
+    } else if (color !== undefined && color !== null) {
+      // ★ R-03 铁律：绝不写 8 位/非法色（运行时只取后 6 位 → 静默错色）★
+      warnings.push({
+        code: 'ADD_COLOR_REJECTED', op: 'ADD', slot: entry.slot, node: entry.node,
+        msg: `IR text.color=${JSON.stringify(color)} 非 6 位 #RRGGBB —— 已拒绝写入该属性（R-03 铁律）`,
+      });
+    }
+  }
+  // QA 前瞻纪律：opacity < 1 必须映射为 alpha（否则半透明被静默写丢）
+  const opacity = layer.opacity;
+  if (typeof opacity === 'number' && Number.isFinite(opacity) && opacity < 1) {
+    attrs.alpha = String(round6(opacity)); // §8.5：浮点统一 round6 定点化
+    if (opacity <= 0) notes.push('opacity<=0（图层不可见）');
+  }
+
+  const strategy = diff.fguiStrategy && typeof diff.fguiStrategy === 'object' ? diff.fguiStrategy : {};
+  if (strategy.button !== undefined) {
+    notes.push(`策略提示按钮类型=${JSON.stringify(strategy.button)}（不自动猜控件类型，`
+      + '可在 gen_plan.json 改 patch.tag 或加 extention 属性后重跑 dryrun）');
+  }
+  notes.push('z-order：ADD 追加到 displayList 末尾（after=null），不推断层级');
+
+  entry.status = STATUS.RESOLVED;
+  entry.patch = { tag, attrs, after: null };
+  entry.note = notes.join('；');
   return entry;
 }
 
@@ -637,6 +837,9 @@ module.exports = {
   resolveNodeByName,
   baseNameOf,
   classifyDiff,
+  classifyAdd,
+  createIdAllocator,
+  findExportedResource,
   summarize,
   GEN_PLAN_VERSION,
   STATUS,
