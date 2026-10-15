@@ -234,13 +234,12 @@ test('④ prepare → gen_plan.json 结构 + 退出码 0 + gate', () => {
   assert.ok(gp._entryNote, '应有逐字段说明');
   assert.deepEqual(gp.task, { name: COMP, targetPkg: PKG, basePkg: PKG });
   assert.equal(gp.target.component, COMP);
-  // ⚠ 与 §4 的偏差（已上报 team-lead）：§4 要求 `assets/MailDetail/MailDetail.xml`
-  //   （工程根相对），但 CLI 目前调用 buildGenPlan 时**未传 options.projectRoot**，
-  //   故走 CLI 时仍是「相对 CLI rootDir」的路径（本项目已实现该能力并由单测锁定，
-  //   CLI 侧另一位工程师负责接线）。此处断言两种形态都满足的强条件，
-  //   等 CLI 传入 projectRoot 后可收紧为严格等值。
-  assert.ok(gp.target.file.endsWith('assets/MailDetail/MailDetail.xml'),
-    `target.file 应以工程内路径结尾，实际 ${gp.target.file}`);
+  // §4：target.file 必须是**工程根相对**路径。CLI 的 prepare 分支已传
+  // `options.projectRoot/rootDir`（见 commit 920f625），gen-plan 用
+  // `core/determinism.toPosixRel` 相对化后输出，故此处按严格等值断言。
+  assert.equal(gp.target.file, 'assets/MailDetail/MailDetail.xml');
+  assert.equal(path.isAbsolute(gp.target.file), false);
+  assert.deepEqual(gp.warnings, [], '工程根相对化成功时不应有告警');
   assert.equal(gp.target.sha256, sha256(fs.readFileSync(f.targetAbs, 'utf8')),
     'target.sha256 应是目标文件内容的 SHA-256');
   assert.ok(gp.target.pkgId, 'target.pkgId 应解析到（真实工程有 8 位包 id）');
