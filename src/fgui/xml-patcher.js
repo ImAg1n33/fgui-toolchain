@@ -119,7 +119,10 @@ function locateNode(text, nodeLoc) {
     throw new AppError(CODES.BAD_ARGUMENT, 'XML 为空或没有根元素，无法定位节点');
   }
   const all = collectElementNodes(parsed.root);
-  const hits = all.filter((n) => keys.every((k) => String(n.attrs[k]) === String(nodeLoc[k])));
+  // ★ tag 键比较的是元素名（解析节点里在 n.tag），id/name/src 才在 n.attrs ★
+  const hits = all.filter((n) => keys.every((k) => (
+    k === 'tag' ? String(n.tag) === String(nodeLoc[k]) : String(n.attrs[k]) === String(nodeLoc[k])
+  )));
 
   if (hits.length === 0) {
     throw new AppError(
