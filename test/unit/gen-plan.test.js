@@ -402,6 +402,56 @@ test('⑤ 外壳: version/_comment/_entryNote/task/target{component,pkg,pkgId,fi
   assert.equal(genPlan.target.sha256.length, 64);
 });
 
+test('⑤ patch 形态: 与 gen-dryrun 冻结的三种形态严格对应（绝不产出第四种）', () => {
+  const ir = irFixture([
+    { id: 'L010', type: 'raster', bbox: { x: 8, y: 8, w: 464, h: 304 } },
+    { id: 'L011', type: 'raster', bbox: { x: 0, y: 0, w: 100, h: 50 } },
+    { id: 'L012', type: 'text', bbox: { x: 1, y: 1, w: 10, h: 10 }, text: { value: 'x', color: '#ffffff' } },
+  ]);
+  const { genPlan } = run([
+    // 只有 size → { attr, value }（§4 定义）
+    { op: 'RESIZE', slot: '图层129', node: 'L011' },
+    // size + scale9grid → { attrs }（多属性形态；gen-dryrun 已支持）
+    { op: 'RESIZE', slot: 'mail_bg', node: 'L010', fguiStrategy: { scale9grid: { scale9grid: '10,10,444,284' } } },
+    // RESTYLE → { attrs }
+    { op: 'RESTYLE', slot: 'title', node: 'L012', fguiStrategy: { color: { color: '#ff0000', alpha: '0.5' } } },
+    // MOVE → { attr, value }
+    { op: 'MOVE', slot: 'mail_bg', node: 'L011' },
+    // ADD → { tag, attrs, after }
+    { op: 'ADD', slot: 'reward_icon', node: 'L010' },
+  ], {
+    targetIr: ir,
+    targetContents: {
+      [TARGET_FILE]: TARGET_XML.replace(
+        '    <image id="b00002" name="图层129" xy="552,92" size="32,32"/>',
+        '    <image id="b00002" name="图层129" xy="552,92" size="32,32"/>\n'
+        + '    <image id="b00006" name="mail_frame" xy="8,8" size="464,304"/>',
+      ),
+    },
+  });
+
+  const allowed = (p) => {
+    if (!p || typeof p !== 'object') return p === null;
+    if (Array.isArray(p)) return false; // ★ 数组形态会打崩 gen-dryrun，禁止
+    if (typeof p.attr === 'string' && typeof p.value === 'string') return true;
+    if (p.attrs && typeof p.attrs === 'object' && !Array.isArray(p.attrs)) return true;
+    if (typeof p.tag === 'string' && p.attrs) return true;
+    return false;
+  };
+  for (const e of genPlan.entries) {
+    assert.ok(allowed(e.patch),
+      `entry ${e.op}/${e.slot} 的 patch 形态不在冻结集合内: ${JSON.stringify(e.patch)}`);
+  }
+
+  const resizeMulti = genPlan.entries.find((e) => e.op === 'RESIZE' && e.slot === 'mail_bg');
+  assert.equal(resizeMulti.status, STATUS.RESOLVED);
+  assert.deepEqual(resizeMulti.patch, { attrs: { size: '464,304', scale9grid: '10,10,444,284' } },
+    'RESIZE+scale9grid 用 { attrs } 而非数组');
+
+  const resizeSingle = genPlan.entries.find((e) => e.op === 'RESIZE' && e.slot === '图层129');
+  assert.deepEqual(resizeSingle.patch, { attr: 'size', value: '100,50' }, '无 scale9grid 时用 §4 定义的单属性形态');
+});
+
 test('⑤ 外壳: 目标组件找不到 → file/sha256 为 null 且不崩 + 明确告警', () => {
   const idx = projectIndexFixture({ components: [] });
   const { genPlan, exitCode } = run([{ op: 'REUSE', slot: 'x', node: 'L1' }], { projectIndex: idx });

@@ -491,14 +491,16 @@ function classifyDiff(a) {
       entry.note = '策略未给 gearSize 且缺少 --target-ir bbox —— 无法确定目标尺寸，请提供后重跑';
       return entry;
     }
-    const patches = [{ attr: 'size', value: size }];
+    const patches = { size };
     // scale9grid 仅在策略**显式**给出 且 目标节点是 image 时设置（D4 / §5）
     const s9 = strategy.scale9grid && typeof strategy.scale9grid === 'object'
       ? strategy.scale9grid.scale9grid : null;
+    let s9Applied = false;
     if (s9) {
       const targetNode = nodes.find((n) => n.id === hit.nodeId);
       if (targetNode && targetNode.tag === 'image') {
-        patches.push({ attr: 'scale9grid', value: String(s9) });
+        patches.scale9grid = String(s9);
+        s9Applied = true;
       } else {
         a.warnings.push({
           code: 'SCALE9GRID_SKIPPED', op, slot, node,
@@ -507,10 +509,16 @@ function classifyDiff(a) {
         });
       }
     }
-    // ⚠ 多补丁时为数组形态（§4 只定义了单对象；此为本轮唯一的接口补充，已上报）
-    entry.patch = patches.length === 1 ? patches[0] : patches;
-    if (Array.isArray(entry.patch)) {
-      entry.note = '本条目含多个属性补丁（size + scale9grid），patch 为数组形态';
+    // ★ patch 形态与第 4 步（gen-dryrun）冻结的三种形态一一对应，绝不产出第四种 ★
+    //   · 只有 size            → { attr:'size', value }（§4 定义）
+    //   · size + scale9grid    → { attrs:{ size, scale9grid } }（多属性形态）
+    //   —— 刻意**不**用数组：gen-dryrun 的 patch 分发只识别
+    //      {tag,attrs,after} / {attrs} / {attr,value} 三种，数组会直接抛错。
+    if (s9Applied) {
+      entry.patch = { attrs: patches };
+      entry.note = '含多属性补丁（size + scale9grid），patch 形态为 { attrs }';
+    } else {
+      entry.patch = { attr: 'size', value: size };
     }
     return entry;
   }
