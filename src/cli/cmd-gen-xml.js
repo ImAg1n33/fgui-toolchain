@@ -37,7 +37,7 @@ const { readJson, readText, writeJson, ensureDir } = require('../core/fs-json');
 const { AppError, CODES, EXIT, toAppError } = require('../core/errors');
 const { locateProject } = require('../fgui/project-reader');
 const { buildGenPlan } = require('../fgui/gen-plan');
-const { runDryrun, applyEntry, buildLintResources } = require('../fgui/gen-dryrun');
+const { runDryrun, buildLintResources, sha256 } = require('../fgui/gen-dryrun');
 const { writeComponentXml } = require('../fgui/transaction');
 const { flagStr, flagBool } = require('./args');
 
@@ -339,27 +339,6 @@ function exitMeaning(code) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
- * 重放 resolved 条目，得到与外层 dryrun 一致的补丁后文本。
- *
- * ★ 为什么在 CLI 侧重放 ★：gen-dryrun 暴露的是「单条目」纯函数 applyEntry，
- *   其 runDryrun 不回传补丁后文本（只回传 sha256/diff）。apply 需要落盘内容，
- *   故用同一份 applyEntry 按同样顺序重放，**不重复实现补丁逻辑**。
- *
- * @param {string} before
- * @param {Object[]} entries
- * @returns {string}
- */
-function replayPatch(before, entries) {
-  let text = before;
-  for (const entry of entries) {
-    if (entry && entry.status === 'resolved') {
-      text = applyEntry(text, entry, []);
-    }
-  }
-  return text;
-}
-
-/**
  * @param {Object} ctx
  * @param {string} outDir
  * @returns {number} 退出码
@@ -380,8 +359,11 @@ function runApplyPhase(ctx, outDir) {
     genPlan, projectIndex, targetContents, projectRoot,
   } = loadGenInputs(ctx);
 
-  // 先跑同一套漂移校验 + 内存打补丁 + lint 门禁（不改盘）
-  const { report, exitCode: gateCode } = runDryrun({
+  // 先跑同一套漂移校验 + 内存打补丁 + lint 门禁（不改盘）。
+  // ★ 关键不变量（方案 A）★：apply 直接写 runDryrun 返回的 `contents[file]` ——
+  //   即 dryrun 校验过的**同一份字节**。绝不自行重放补丁，从而杜绝
+  //   「dryrun 报告 sha256After ≠ 实际落盘内容」这类可静默漂移的重复实现。
+  const { report, exitCode: gateCode, contents: patched } = runDryrun({
     genPlan, projectIndex, targetContents, options: { config },
   });
 
@@ -391,10 +373,19 @@ function runApplyPhase(ctx, outDir) {
   let firstFailure = null;
 
   if (gateCode === EXIT.OK) {
-    const entries = Array.isArray(genPlan.entries) ? genPlan.entries : [];
     for (const f of report.files) {
-      const before = targetContents[f.file];
-      const content = replayPatch(before, entries);
+      const content = patched && typeof patched[f.file] === 'string' ? patched[f.file] : null;
+      // 兜底：dryrun 与 apply 同一进程内调用，contents 必须存在且与报告 sha256After 一致
+      if (content === null) {
+        firstFailure = { exitCode: EXIT.USAGE };
+        results.push({ applied: false, file: f.file, error: 'dryrun 未产出该文件的补丁内容（内部不一致，拒绝写盘）', code: 'INTERNAL' });
+        continue;
+      }
+      if (sha256(content) !== f.sha256After) {
+        firstFailure = { exitCode: EXIT.USAGE };
+        results.push({ applied: false, file: f.file, error: 'dryrun 校验字节与待写内容不一致（内部不一致，拒绝写盘）', code: 'INTERNAL' });
+        continue;
+      }
       const abs = resolveTargetPath(projectRoot, ctx.rootDir, f.file, logger);
       try {
         const r = writeComponentXml({

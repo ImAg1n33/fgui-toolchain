@@ -22,8 +22,12 @@
  *
  * ★ 接口契约（team-lead 已定死）★
  *   runDryrun({ genPlan, projectIndex, targetContents, options })
- *     → { report, exitCode }
+ *     → { report, exitCode, contents }
  *   · targetContents: { [file]: string }，调用方读好的目标 XML 内容。
+ *   · contents: { [file]: patchedText } —— **dryrun 校验过的那份字节**。
+ *     apply 必须写这份内容（不再自行重放补丁），从而让
+ *     「apply 写盘字节 == dryrun 校验字节」成为**结构性不变量**：
+ *     report.files[].sha256After 即真正落盘内容的校验和。
  * ════════════════════════════════════════════════════════════════════════════
  */
 
@@ -285,7 +289,20 @@ function toSkipRecord(entry) {
  * @throws {AppError} 定位/插入失败
  */
 function applyEntry(text, entry, notes) {
-  const patch = entry.patch || {};
+  // ★ REUSE（及任何 patch 为 null / 缺键的已 resolved 条目）是「已处理的空操作」，★
+  //   ★ 不是错误 ★：按 M2-SPEC §4/§5，REUSE 的契约就是 status='resolved' + patch=null
+  //   （仅确认节点存在、复用，不改任何字节）。若在此抛错，会经调用方把 exitCode 抬成
+  //   USAGE(2) —— 而真实 change_plan 几乎必含 REUSE（Reuse-First 是产品核心路径），
+  //   导致的后果是「任何含 REUSE 的 plan 都整体失败、一个补丁都应用不了」。
+  //   gen-plan 显式输出 patch:null；此处**同时容忍 null 与缺键**（契约冻结）。
+  if (entry.patch === null || entry.patch === undefined) {
+    if (notes) {
+      notes.push(`空操作（no-op，无补丁）：op=${entry.op || '?'} slot=${entry.slot || '?'} `
+        + 'nodeId=' + (entry.nodeId || '?') + ' —— 复用已存在节点，不改字节');
+    }
+    return text;
+  }
+  const patch = entry.patch;
   // ADD：{ tag, attrs, after }
   if (patch.tag) {
     const rendered = renderNode({ tag: patch.tag, attrs: patch.attrs || {} });
@@ -345,6 +362,7 @@ function runDryrun(input = {}) {
   const files = [];
   let entriesApplied = 0;
   let entriesSkipped = 0;
+  let entriesNoop = 0;
   let lintErrorCount = 0;
 
   if (!targets.length) {
@@ -355,11 +373,12 @@ function runDryrun(input = {}) {
         ok: false,
         files: [],
         summary: {
-          filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, lintErrors: 0,
+          filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, entriesNoop: 0, lintErrors: 0,
         },
         errors: topErrors,
         warnings: reportWarnings,
       },
+      contents: {},
     };
   }
 
@@ -405,16 +424,18 @@ function runDryrun(input = {}) {
         ok: false,
         files,
         summary: {
-          filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, lintErrors: 0,
+          filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, entriesNoop: 0, lintErrors: 0,
         },
         errors: topErrors,
         warnings: reportWarnings,
       },
+      contents: {},
     };
   }
 
   // ---- 阶段 2/3/4：逐文件打补丁 + lint + diff ----
   const appliedEntries = [];
+  const noopEntries = [];
   const skippedEntries = [];
   const touchedFiles = new Set(targets.map((t) => t.file));
 
@@ -437,10 +458,17 @@ function runDryrun(input = {}) {
       }
       try {
         const notes = fileNotes.get(file);
+        const noop = entry.patch === null || entry.patch === undefined;
         const next = applyEntry(work.get(file), entry, notes);
         work.set(file, next);
-        appliedEntries.push({ op: entry.op || null, slot: entry.slot === undefined ? null : entry.slot, nodeId: entry.nodeId === undefined ? null : entry.nodeId });
-        entriesApplied += 1;
+        if (noop) {
+          // ★ 账目诚实：这类是「已处理的空操作」，不是 skipped、也不是 applied ★
+          entriesNoop += 1;
+          noopEntries.push({ op: entry.op || null, slot: entry.slot === undefined ? null : entry.slot, nodeId: entry.nodeId === undefined ? null : entry.nodeId });
+        } else {
+          appliedEntries.push({ op: entry.op || null, slot: entry.slot === undefined ? null : entry.slot, nodeId: entry.nodeId === undefined ? null : entry.nodeId });
+          entriesApplied += 1;
+        }
       } catch (err) {
         // patch 失败 = plan 与工程不一致 → 记 error 并按 USAGE 处理（不静默）
         const msg = `条目 patch 失败（op=${entry.op || '?'} slot=${entry.slot || '?'} nodeId=${entry.nodeId || '?'}）：${err.message}`;
@@ -455,10 +483,14 @@ function runDryrun(input = {}) {
   }
 
   let lintBlocked = false;
+  /** @type {Object<string,string>} 补丁后文本（供 apply 原样落盘 —— 见下方不变量） */
+  const patchedContents = {};
   for (const t of targets) {
     const before = contents[t.file];
     const after = work.get(t.file);
     const changed = before !== after;
+    // ★ 不变量：apply 必须写 runDryrun 校验过的这份字节（见文件头 + 返回值的 contents）★
+    patchedContents[t.file] = after;
 
     const lint = lintComponentXml(after, {
       config: options.config,
@@ -521,12 +553,13 @@ function runDryrun(input = {}) {
       filesChanged: files.filter((f) => f.changed).length,
       entriesApplied,
       entriesSkipped,
+      entriesNoop,
       lintErrors: lintErrorCount,
     },
     errors: topErrors,
     warnings: reportWarnings,
   };
-  return { report, exitCode };
+  return { report, exitCode, contents: patchedContents };
 }
 
 module.exports = {

@@ -257,3 +257,28 @@ test('dryrun: D9 防静默降级 —— 资源注入表为空且有 ui:// 引用
   const c = runDryrun({ genPlan: planNoRef, projectIndex: emptyRes, targetContents: { [FILE]: noRef } });
   assert.ok(!c.report.warnings.some((w) => w.code === 'LINT_RESOURCES_EMPTY'), '无 ui:// 引用时不应告警');
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+test('dryrun: REUSE（resolved + patch:null）是空操作，不抛错、不改字节、不计 applied/skipped', () => {
+  const content = readTarget();
+  const base = { version: '1.0', target: { file: FILE, sha256: sha256(content) } };
+
+  // (a) 显式 patch: null
+  const p1 = { ...base, entries: [{ op: 'REUSE', slot: 'frame', status: 'resolved', nodeId: 'c00001', patch: null }] };
+  const r1 = runDryrun({ genPlan: p1, projectIndex: null, targetContents: { [FILE]: content } });
+  assert.equal(r1.exitCode, 0, 'REUSE 不得把退出码抬成 2');
+  assert.deepEqual(r1.report.errors, [], 'REUSE 不得记 error');
+  assert.equal(r1.report.files[0].changed, false, '空操作不应改字节');
+  assert.equal(r1.report.files[0].diff, '', '空操作不应产生 diff');
+  assert.equal(r1.report.summary.entriesNoop, 1);
+  assert.equal(r1.report.summary.entriesApplied, 0);
+  assert.equal(r1.report.summary.entriesSkipped, 0, '空操作不是 skipped');
+  assert.ok(r1.report.files[0].notes.some((n) => /no-op/.test(n)), 'notes 应可见该空操作');
+
+  // (b) 缺 patch 键（契约要求同时容忍 null 与缺键）
+  const p2 = { ...base, entries: [{ op: 'REUSE', slot: 'frame', status: 'resolved', nodeId: 'c00001' }] };
+  const r2 = runDryrun({ genPlan: p2, projectIndex: null, targetContents: { [FILE]: content } });
+  assert.equal(r2.exitCode, 0);
+  assert.equal(r2.report.summary.entriesNoop, 1);
+  assert.deepEqual(r2.report.errors, []);
+});
