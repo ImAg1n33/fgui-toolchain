@@ -52,6 +52,9 @@ function ok(name, cond, evidence) {
 
 const FILES = {
   lint: 'src/fgui/lint-rules.js',
+  // ★ M1：parseXmlDocument 与 BUG-A 码点上界校验已提炼到 xml-parse.js
+  //   （与 indexer 共用同一份解析器）。变异锚点随之迁移，此处显式记录。
+  xml: 'src/fgui/xml-parse.js',
   tx: 'src/fgui/transaction.js',
   store: 'src/assets/store.js',
   indexer: 'src/assets/indexer.js',
@@ -111,7 +114,7 @@ console.log('=== R2-0. 基线：三个目标测试文件全绿 ===');
 console.log('\n=== R2-1. BUG-A 变异：修复回退后测试必须红 ===');
 {
   // M-A1：只去码点上界校验（兜底 try/catch 仍在）→ 具体码点信息断言必红
-  const m1 = withMutation('lint',
+  const m1 = withMutation('xml',
     'code < 0 || code > MAX_CODE_POINT',
     'code < 0',
     'lint',
@@ -150,15 +153,19 @@ console.log('\n=== R2-1. BUG-A 变异：修复回退后测试必须红 ===');
 
   // M-A2b：两个修复都回退 → 必须红（doesNotThrow 失败）
   const lintSrc = fs.readFileSync(path.join(ROOT, FILES.lint), 'utf8');
+  const xmlSrc = fs.readFileSync(path.join(ROOT, FILES.xml), 'utf8');
   const fullyReverted = lintSrc
     .replace('code < 0 || code > MAX_CODE_POINT', 'code < 0')
     .replace(tryCatchBlock, '    parsed = parseXmlDocument(xml);');
+  // 两处都要回退：码点上界在 xml-parse.js（M1 提炼），try/catch 兜底在 lint-rules.js
+  fs.writeFileSync(path.join(ROOT, FILES.xml), xmlSrc.replace('code < 0 || code > MAX_CODE_POINT', 'code < 0'), 'utf8');
   fs.writeFileSync(path.join(ROOT, FILES.lint), fullyReverted, 'utf8');
   let r2b;
   try {
     r2b = runTest(TESTS.lint);
   } finally {
     fs.writeFileSync(path.join(ROOT, FILES.lint), lintSrc, 'utf8');
+    fs.writeFileSync(path.join(ROOT, FILES.xml), xmlSrc, 'utf8');
   }
   const failed2b = [...r2b.out.matchAll(/^✖ (.+)$/gm)].map((x) => x[1].trim());
   const bugA2b = failed2b.filter((f) => f.includes('BUG-A')).length;
@@ -166,6 +173,7 @@ console.log('\n=== R2-1. BUG-A 变异：修复回退后测试必须红 ===');
     r2b.code !== 0 && bugA2b >= 3,
     `exit=${r2b.code} BUG-A 失败数=${bugA2b} failed=${JSON.stringify(failed2b.slice(0, 5))}`);
   ok('M-A2b 恢复后复绿', fs.readFileSync(path.join(ROOT, FILES.lint), 'utf8') === lintSrc
+    && fs.readFileSync(path.join(ROOT, FILES.xml), 'utf8') === xmlSrc
     && runTest(TESTS.lint).code === 0);
 }
 

@@ -31,6 +31,7 @@ const COMMANDS = Object.freeze({
   'calibrate-grid9': { module: './cmd-calibrate-grid9', desc: 'E-03 九宫格阈值标定：切图目录 + 人工标注 -> 建议阈值 + 差异报告（只建议，不改配置）' },
   selftest: { module: './cmd-selftest', desc: '一键自检（合成黄金样本跑通全链路）' },
   'gen-xml': { module: './cmd-gen-xml', desc: '[P1 桩] 生成 FGUI 组件 XML —— 本轮未实现' },
+  'project-index': { module: './cmd-project-index', desc: 'M1：FGUI 工程只读索引（package.xml + 组件 XML -> project_index.json）' },
 });
 
 /**

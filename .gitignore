@@ -49,3 +49,6 @@ qa-orig/
 # ---- docs 内部文档：仅 ARCHITECTURE.md 入库，其余为内部过程/交接文档 ----
 docs/*
 !docs/ARCHITECTURE.md
+
+# ---- M1 合成 FGUI 工程：由 make-fgui-project.js 重建（确定性），不入库 ----
+test/fixtures/fgui-project/
