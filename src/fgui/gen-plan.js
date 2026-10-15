@@ -19,8 +19,9 @@
  */
 
 const crypto = require('crypto');
+const path = require('path');
 const { AppError, CODES, EXIT } = require('../core/errors');
-const { round6 } = require('../core/determinism');
+const { round6, toPosixRel } = require('../core/determinism');
 // ⚠ 偏差说明：team-lead 消息说「退出码用 src/fgui/constants.js 里的 EXIT」，
 //    但 constants.js 并不导出 EXIT（校验过 exports 列表）—— EXIT 定义在
 //    src/core/errors.js。此处按实际契约从 core/errors 取。
@@ -122,7 +123,12 @@ function isUnconfirmed(diff) {
  * @param {Object} [args.targetIr] 目标 Design IR
  * @param {Object} [args.targetContents] `{ [relPath]: xmlString }`（CLI 读好传入）
  * @param {Object} [args.options]
- * @param {boolean} [args.options.skipUnconfirmed=false]
+ * @param {boolean} [args.options.skipUnconfirmed=false] 丢弃未确认条目而非阻塞
+ * @param {string} [args.options.projectRoot] FGUI 工程根（绝对路径）——
+ *        给出后 `target.file` 输出**工程根相对**路径（M2-SPEC §4）；
+ *        不给则沿用 index 原值（保持旧行为，不破坏既有调用方）。
+ * @param {string} [args.options.rootDir] CLI rootDir —— index 里的 `file`
+ *        是相对它的；缺省 `process.cwd()`。CLI 应显式传入以避免依赖 cwd。
  * @returns {{genPlan:Object, exitCode:number}} exitCode ∈ {EXIT.OK, EXIT.NEEDS_HUMAN}
  */
 function buildGenPlan(args = {}) {
@@ -167,7 +173,9 @@ function buildGenPlan(args = {}) {
     }
     return {
       genPlan: buildEnvelope({
-        changePlan, projectIndex, targetContents, gate: {
+        changePlan, projectIndex, targetContents,
+        projectRoot: options.projectRoot, rootDir: options.rootDir,
+        gate: {
           needsHuman: true,
           inferredCount: gateInfo.inferredCount,
           ambiguousCount: gateInfo.ambiguousCount,
@@ -248,6 +256,7 @@ function buildGenPlan(args = {}) {
   return {
     genPlan: buildEnvelope({
       changePlan, projectIndex, targetContents,
+      projectRoot: options.projectRoot, rootDir: options.rootDir,
       gate: {
         needsHuman: false,
         inferredCount: gateInfo.inferredCount,
@@ -849,6 +858,53 @@ function classifyAdd(a, entry) {
   return entry;
 }
 
+/**
+ * 把目标文件路径相对化到 **FGUI 工程根**（M2-SPEC §4：`assets/MailDetail/MailDetail.xml`）。
+ *
+ * ★ 为什么需要这一步 ★（team-lead 实测 + 本轮修正）
+ *   `project_index.components[].file` 是**相对 CLI rootDir** 的，实测形如
+ *   `out/<tmp>/project/assets/MailDetail/MailDetail.xml`。直接沿用它既不符合
+ *   §4 的字段语义，又把临时目录路径写进了**人可读、可编辑**的 gen_plan.json。
+ *
+ * ★ 相对化失败时不许猜 ★
+ *   文件不在工程根下（跨盘、`outside-root/` 降级形态等）→ 保留 index 原值，
+ *   并显式 warning（`TARGET_FILE_NOT_UNDER_PROJECT_ROOT`，note 同时给出
+ *   「工程根」与「index 原始路径」两条信息）交给人工判断，绝不静默。
+ *
+ * 相对化**复用** `core/determinism.toPosixRel`（不自己拼字符串）。
+ *
+ * @param {string|null} file index 里的路径（绝对或相对 CLI rootDir）
+ * @param {string|null|undefined} projectRoot FGUI 工程根（绝对路径）
+ * @param {string|undefined} rootDir CLI rootDir（用于把相对 file 变绝对；缺省 process.cwd()）
+ * @param {Object[]} warnings 收集器
+ * @returns {string|null}
+ */
+function relativizeTargetFile(file, projectRoot, rootDir, warnings) {
+  if (!file) return file;
+  if (!projectRoot) return file; // 未给工程根 → 原样（调用方未启用该能力）
+  const base = rootDir || process.cwd();
+  const abs = path.isAbsolute(file) ? file : path.resolve(base, file);
+
+  let rel = null;
+  try {
+    rel = toPosixRel(projectRoot, abs);
+  } catch (err) {
+    rel = null; // 两侧不在同一根（Windows 跨盘等）
+  }
+  // 判定「不在工程根下」：空、绝对路径、带盘符、或以 .. 开头
+  const outside = !rel || path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel) || rel.startsWith('..');
+  if (outside) {
+    warnings.push({
+      code: 'TARGET_FILE_NOT_UNDER_PROJECT_ROOT',
+      msg: `目标文件不在 FGUI 工程根下 —— 已保留 index 原值，不做猜测：`
+        + `工程根=${projectRoot}；index 原始路径=${file}`
+        + '（若这是预期的「工程外引用」，请人工核对 gen_plan.json 的 target.file）',
+    });
+    return file;
+  }
+  return rel;
+}
+
 /** 空 summary。 */
 function emptySummary() {
   return { total: 0, byOp: {}, byStatus: {} };
@@ -867,6 +923,8 @@ function buildEnvelope(a) {
   const target = components.find((c) => c.pkg === task.targetPkg && c.name === task.name) || null;
   const file = target ? target.file : null;
   const content = file && typeof a.targetContents[file] === 'string' ? a.targetContents[file] : null;
+  // ★ target.file 输出到「FGUI 工程根相对」；失败时保留原值 + 显式 warning（不猜）★
+  const targetFile = relativizeTargetFile(file, a.projectRoot, a.rootDir, a.warnings || []);
 
   return {
     version: GEN_PLAN_VERSION,
@@ -894,7 +952,8 @@ function buildEnvelope(a) {
       pkgId: target && target.pkgId !== undefined && target.pkgId !== null
         ? String(target.pkgId)
         : resolvePkgId(a.projectIndex, task.targetPkg),
-      file,
+      // ★ target.file = 工程根相对路径（§4）；内容查找仍用 index 原始键（file）★
+      file: targetFile,
       sha256: content === null ? null : sha256Hex(content),
     },
     entries: a.entries || [],
@@ -950,6 +1009,7 @@ module.exports = {
   createIdAllocator,
   findExportedResource,
   listExportedImageNames,
+  relativizeTargetFile,
   RESOURCE_MATCH,
   summarize,
   GEN_PLAN_VERSION,

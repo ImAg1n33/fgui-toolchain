@@ -16,6 +16,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('path');
 
 const {
   buildGenPlan, isUnconfirmed, evaluateGate, createIdAllocator, sha256Hex,
@@ -600,6 +601,65 @@ test('⑤ 外壳: 未知 op 不静默（blocked + warning）', () => {
   assert.equal(e.status, STATUS.BLOCKED);
   assert.ok(e.note.includes('TELEPORT'));
   assert.ok(genPlan.warnings.some((w) => w.code === 'UNKNOWN_OP'));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// A3-0：target.file 改为「FGUI 工程根相对」（M2-SPEC §4）
+// ════════════════════════════════════════════════════════════════════════════
+
+const REPO = path.resolve(__dirname, '../..');
+
+test('A3-0 正常: index 的 file 相对 CLI rootDir → target.file 输出工程根相对路径', () => {
+  // index 产物：`file` 相对 **CLI rootDir**（实测形如
+  // `out/<tmp>/project/assets/MailDetail/MailDetail.xml`），不该写进人可读产物
+  const projectRoot = path.join(REPO, 'out', 'tmp', 'project');
+  const idx = projectIndexFixture({
+    components: [{
+      pkg: 'Mail', name: 'MailDetail',
+      file: 'out/tmp/project/assets/MailDetail/MailDetail.xml',
+    }],
+  });
+  const { genPlan } = run([{ op: 'REUSE', slot: 'mail_bg', node: 'L001' }], {
+    projectIndex: idx,
+    options: { projectRoot, rootDir: REPO },
+  });
+  assert.equal(genPlan.target.file, 'assets/MailDetail/MailDetail.xml',
+    '★ §4：target.file 必须是工程根相对路径');
+  assert.equal(path.isAbsolute(genPlan.target.file), false);
+  assert.ok(!genPlan.warnings.some((w) => w.code === 'TARGET_FILE_NOT_UNDER_PROJECT_ROOT'));
+});
+
+test('A3-0 正常: file 已是工程根相对时保持不变（幂等）', () => {
+  const idx = projectIndexFixture(); // file = 'assets/Mail/MailDetail.xml'
+  const { genPlan } = run([{ op: 'REUSE', slot: 'mail_bg', node: 'L001' }], {
+    projectIndex: idx,
+    options: { projectRoot: REPO, rootDir: REPO },
+  });
+  assert.equal(genPlan.target.file, TARGET_FILE);
+});
+
+test('A3-0 异常: 文件不在工程根下 → 保留原值 + 显式 warning（不猜、不抛错）', () => {
+  const projectRoot = path.join(REPO, 'out', 'tmp', 'project');
+  const idx = projectIndexFixture({
+    components: [{ pkg: 'Mail', name: 'MailDetail', file: 'outside-root/some/other.xml' }],
+  });
+  const { genPlan, exitCode } = run([{ op: 'REUSE', slot: 'mail_bg', node: 'L001' }], {
+    projectIndex: idx,
+    options: { projectRoot, rootDir: REPO },
+  });
+  assert.equal(exitCode, EXIT.OK, '不抛错');
+  assert.equal(genPlan.target.file, 'outside-root/some/other.xml',
+    '★ 不在工程根下时不猜，保留 index 原值');
+  const w = genPlan.warnings.find((x) => x.code === 'TARGET_FILE_NOT_UNDER_PROJECT_ROOT');
+  assert.ok(w, '★ 必须显式告警，绝不静默');
+  assert.ok(w.msg.includes(projectRoot), 'warning 应给出「工程根」');
+  assert.ok(w.msg.includes('outside-root/some/other.xml'), 'warning 应给出「index 原始路径」');
+});
+
+test('A3-0 兼容: 未给 projectRoot → 沿用 index 原值（不破坏既有调用方）', () => {
+  const { genPlan } = run([{ op: 'REUSE', slot: 'mail_bg', node: 'L001' }]);
+  assert.equal(genPlan.target.file, TARGET_FILE);
+  assert.ok(!genPlan.warnings.some((w) => w.code === 'TARGET_FILE_NOT_UNDER_PROJECT_ROOT'));
 });
 
 // ════════════════════════════════════════════════════════════════════════════
