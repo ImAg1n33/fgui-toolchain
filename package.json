@@ -15,7 +15,7 @@
     "test:unit": "node --disable-warning=ExperimentalWarning --test \"test/unit/*.test.js\"",
     "test:e2e": "node --disable-warning=ExperimentalWarning --test \"test/e2e/*.test.js\"",
     "qa": "node --disable-warning=ExperimentalWarning test/run-qa-suite.js",
-    "fixtures": "node --disable-warning=ExperimentalWarning test/fixtures/make-assets.js && node --disable-warning=ExperimentalWarning test/fixtures/make-psd.js",
+    "fixtures": "node --disable-warning=ExperimentalWarning test/fixtures/make-assets.js && node --disable-warning=ExperimentalWarning test/fixtures/make-psd.js && node --disable-warning=ExperimentalWarning test/fixtures/make-fgui-project.js",
     "selftest": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js selftest",
     "bench": "node --disable-warning=ExperimentalWarning test/bench/search-bench.js",
     "asset-index": "node --disable-warning=ExperimentalWarning bin/fgui-rb.js asset-index",

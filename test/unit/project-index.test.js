@@ -36,9 +36,33 @@ const FIXTURE = path.join(ROOT, 'test/fixtures/fgui-project');
 /** 保证 fixture 存在（缺就现造；脚本确定性，重复造无害）。 */
 function ensureFixture() {
   if (!fs.existsSync(path.join(FIXTURE, 'MailPopup.fairy'))) {
-    makeFguiProject({ outDir: FIXTURE });
+    try {
+      makeFguiProject({ outDir: FIXTURE });
+    } catch (err) {
+      throw new Error(
+        `M1 合成工程 fixture 缺失且现场生成失败：${err.message}\n`
+        + '请先跑 `npm run fixtures`（其中包含 make-fgui-project.js），或检查该脚本依赖',
+      );
+    }
   }
   return FIXTURE;
+}
+
+/**
+ * 造一个索引输出用的临时目录。
+ *
+ * ★ 必须确保 `out/` 父目录存在 ★（CI 教训）：干净 checkout 里 `out/` 是
+ * gitignored 且不存在，`mkdtempSync(ROOT/out/xxx)` 会直接 ENOENT ——
+ * 本地有 `out/` 所以测不出来，CI 双平台一致红 4 条。
+ * 放 ROOT 下而不是 os.tmpdir()：这样产物里的路径走同盘相对化，
+ * 不会触发跨盘降级（outside-root/…），断言更贴近真实管线。
+ *
+ * @param {string} tag
+ * @returns {string}
+ */
+function tmpOut(tag) {
+  fs.mkdirSync(path.join(ROOT, 'out'), { recursive: true });
+  return fs.mkdtempSync(path.join(ROOT, 'out', tag));
 }
 
 /**
@@ -85,9 +109,22 @@ function snapshotDir(dir) {
   return out;
 }
 
+test('M1 管线守卫: npm run fixtures 必须包含 make-fgui-project（CI 曾因此双平台红 4 条）', () => {
+  // ★ CI 教训（本地绿/CI 红）★：fixtures script 曾漏掉 make-fgui-project.js，
+  //   干净 checkout 上合成 FGUI 工程从未生成。测试自身能现场兜底生成
+  //   （ensureFixture），但**管线契约**要有人守 —— 静态断言 scripts.fixtures
+  //   含三个生成器，缺任何一个即红（Windows 开发机上也能红，不依赖 CI）。
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const script = String(pkg.scripts && pkg.scripts.fixtures || '');
+  for (const gen of ['make-assets.js', 'make-psd.js', 'make-fgui-project.js']) {
+    assert.ok(script.includes(gen),
+      `★ fixtures script 必须包含 ${gen}（干净 checkout 依赖它造 fixture）：${script}`);
+  }
+});
+
 test('M1: 合成 fixture 能被完整索引（结构断言）', async () => {
   ensureFixture();
-  const out = fs.mkdtempSync(path.join(ROOT, 'out', 'pi-struct-'));
+  const out = tmpOut('pi-struct-');
   try {
     const { code } = await runIndex(out);
     assert.equal(code, 0);
@@ -186,7 +223,7 @@ test('M1 交叉验证二（上游 baseline 对账）: bridge 的无斜杠拼接�
   assert.equal(parseUiRef(undefined), null);
 
   // fixture 的 RewardCell 就用拼接风格，索引必须把它解析成边
-  const out = fs.mkdtempSync(path.join(ROOT, 'out', 'pi-baseline-'));
+  const out = tmpOut('pi-baseline-');
   return runIndex(out).then(({ code }) => {
     try {
       assert.equal(code, 0);
@@ -204,7 +241,7 @@ test('M1 交叉验证二（上游 baseline 对账）: bridge 的无斜杠拼接�
 test('M1 只读性: 索引前后工程目录文件级快照（含 mtime）零变化', async () => {
   ensureFixture();
   const before = snapshotDir(FIXTURE);
-  const out = fs.mkdtempSync(path.join(ROOT, 'out', 'pi-readonly-'));
+  const out = tmpOut('pi-readonly-');
   try {
     const { code } = await runIndex(out);
     assert.equal(code, 0);
@@ -218,8 +255,8 @@ test('M1 只读性: 索引前后工程目录文件级快照（含 mtime）零变
 
 test('M1 确定性: 同输入两次运行 project_index.json md5 一致', async () => {
   ensureFixture();
-  const out1 = fs.mkdtempSync(path.join(ROOT, 'out', 'pi-det1-'));
-  const out2 = fs.mkdtempSync(path.join(ROOT, 'out', 'pi-det2-'));
+  const out1 = tmpOut('pi-det1-');
+  const out2 = tmpOut('pi-det2-');
   try {
     await runIndex(out1);
     await runIndex(out2);
