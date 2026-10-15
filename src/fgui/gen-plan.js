@@ -26,6 +26,7 @@ const { round6 } = require('../core/determinism');
 //    src/core/errors.js。此处按实际契约从 core/errors 取。
 const { ID_PREFIXES, ID_DIGITS } = require('./constants');
 const { indexComponentXml } = require('./component-indexer');
+const { normalizeName } = require('../core/normalize');
 const { planNeedsHuman } = require('../diff/planner');
 
 /** 生成计划的产品版本号。 */
@@ -239,6 +240,8 @@ function buildGenPlan(args = {}) {
     pkgId: resolvePkgId(projectIndex, task.targetPkg),
     projectIndex,
     ids,
+    // 资源名归一化选项（默认与 fgui.config.json 的 normalize 段一致）
+    normOpts: options.normalize,
     warnings,
   }));
 
@@ -615,18 +618,61 @@ function createIdAllocator(nodes) {
 const ADD_TAG_BY_TYPE = Object.freeze({ text: 'text', group: 'group', raster: 'image' });
 
 /**
+ * 资源名匹配用的归一化默认值。
+ *
+ * ★ 为什么需要它（真实 fixture 实测发现）★
+ *   `project_index.resources[].name` 在真实合成工程里**带扩展名**
+ *   （`reward_icon.png`），而 XML 节点名 / change_plan 的 slot 是
+ *   `reward_icon`（不带）。若只做严格字符串相等，会把**已登记**的资源
+ *   误判为「未登记」→ 提示小 Q 去导入他已有的素材（假 blocked 比漏判更伤）。
+ *   故补一层「归一化后全等」匹配 —— 复用 P0 的 `normalizeName`
+ *   （去扩展名/大小写/副本后缀/繁简），**仍是全等**，不违反 K5（禁前缀/子串）。
+ *   与 fgui.config.json 的 normalize 段同默认值；`options.normalize` 可覆盖。
+ */
+const DEFAULT_NORM_OPTS = Object.freeze({
+  stripCopySuffix: true, stripExtension: true, useVariants: true,
+});
+
+/**
  * 在目标包的资源里找已登记且 exported 的图片（D3）。
+ *
+ * 两级匹配（先精确、后归一化全等），命中即返回；**绝不前缀/子串匹配**（K5）。
+ *
  * @param {Object} projectIndex
  * @param {string} targetPkg
- * @param {string[]} keys 候选名（slot / normName）
+ * @param {string[]} keys 候选名（slot / normName / baseName）
+ * @param {Object} [normOpts] 透传 normalizeName
  * @returns {Object|null}
  */
-function findExportedResource(projectIndex, targetPkg, keys) {
+function findExportedResource(projectIndex, targetPkg, keys, normOpts) {
   const res = Array.isArray(projectIndex && projectIndex.resources) ? projectIndex.resources : [];
+  const opts = normOpts && typeof normOpts === 'object' ? normOpts : DEFAULT_NORM_OPTS;
   const wanted = keys.filter((k) => typeof k === 'string' && k.trim());
   if (!wanted.length) return null;
-  return res.find((r) => r && r.pkg === targetPkg && r.exported
-    && (wanted.includes(r.name) || wanted.includes(String(r.id)))) || null;
+  const inPkg = res.filter((r) => r && r.pkg === targetPkg && r.exported);
+  // ① 精确：name 或 id 全等
+  const exact = inPkg.find((r) => wanted.includes(r.name) || wanted.includes(String(r.id)));
+  if (exact) return exact;
+  // ② 归一化后全等（去扩展名/大小写等；仍是全等，非子串）
+  const wantedNorm = new Set(wanted.map((k) => normalizeName(k, opts)));
+  return inPkg.find((r) => r.name && wantedNorm.has(normalizeName(String(r.name), opts))) || null;
+}
+
+/**
+ * 列出目标包内已导出的图片名（供 blocked 时给出可操作信息，不参与匹配）。
+ * @param {Object} projectIndex
+ * @param {string} targetPkg
+ * @param {number} [limit=8]
+ * @returns {string[]}
+ */
+function listExportedImageNames(projectIndex, targetPkg, limit) {
+  const res = Array.isArray(projectIndex && projectIndex.resources) ? projectIndex.resources : [];
+  const max = Number.isFinite(limit) ? limit : 8;
+  const names = res
+    .filter((r) => r && r.pkg === targetPkg && r.exported && r.type === 'image' && r.name)
+    .map((r) => String(r.name));
+  const shown = names.slice(0, max);
+  return names.length > max ? [...shown, `…(共 ${names.length} 个)`] : shown;
 }
 
 /**
@@ -680,12 +726,17 @@ function classifyAdd(a, entry) {
   const attrs = {};
   if (tag === 'image') {
     const keys = [entry.slot, diff.normName, diff.baseName].filter((k) => typeof k === 'string' && k);
-    const res = findExportedResource(projectIndex, targetPkg, keys);
+    const res = findExportedResource(projectIndex, targetPkg, keys, a.normOpts);
     if (!res) {
+      // ★ blocked 也要可操作：列出目标包内已导出的图片名（纯信息，不参与匹配）★
+      const available = listExportedImageNames(projectIndex, targetPkg);
       entry.status = STATUS.BLOCKED;
       entry.note = `图片资源 ${JSON.stringify(keys.filter(Boolean))} 未在目标包 package.xml 中登记/未 exported`
         + ' —— 需先导入素材并登记 package.xml（本工具**永不自动修改** package.xml，PRD R4-F6），'
-        + '登记后重跑 prepare';
+        + '登记后重跑 prepare'
+        + (available.length
+          ? `。目标包内已导出的图片：${available.join(', ')}（如目标资源已在此列，请把 change_plan 的 slot 改成与资源名一致）`
+          : '。目标包内当前**没有任何**已导出的图片资源');
       warnings.push({
         code: 'ADD_RESOURCE_NOT_REGISTERED', op: 'ADD', slot: entry.slot, node: entry.node,
         msg: `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
@@ -848,7 +899,9 @@ module.exports = {
   classifyAdd,
   createIdAllocator,
   findExportedResource,
+  listExportedImageNames,
   summarize,
   GEN_PLAN_VERSION,
+  DEFAULT_NORM_OPTS,
   STATUS,
 };

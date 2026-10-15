@@ -252,6 +252,64 @@ test('③ ADD: 资源未登记 → blocked，note 含 package.xml 字样', () =>
   assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_REGISTERED'));
 });
 
+test('③ ADD: 资源名带扩展名（真实 fixture 形态）→ 归一化后仍能匹配，不误报 blocked', () => {
+  // ★ 真实合成工程实测：resources[].name 是 'reward_icon.png'（带扩展名），
+  //   而 XML 节点名/slot 是 'reward_icon'（不带）。严格相等会把**已登记**的
+  //   资源误判为未登记 → 假 blocked（比漏判更伤：让人去导入已有素材）。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true, width: 96, height: 96 },
+    ],
+  });
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 96, h: 96 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.RESOLVED, `带扩展名的资源名应能匹配，note=${e.note}`);
+  assert.equal(e.patch.attrs.src, 'ui://e5f6a7b8/r0001');
+});
+
+test('③ ADD: 大小写差异的资源名归一化匹配（popup_bg.PNG ↔ popup_bg）', () => {
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0009', name: 'popup_bg.PNG', exported: true },
+    ],
+  });
+  const { genPlan } = run([{ op: 'ADD', slot: 'popup_bg', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  assert.equal(genPlan.entries[0].status, STATUS.RESOLVED);
+});
+
+test('③ ADD: K5 铁律 —— 绝不做前缀/子串匹配（reward ≠ reward_icon2）', () => {
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true },
+    ],
+  });
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  assert.equal(genPlan.entries[0].status, STATUS.BLOCKED,
+    '★ reward 不是 reward_icon.png 的归一化全等名 —— 必须 blocked，绝不能前缀匹配');
+});
+
+test('③ ADD: blocked 时 note 列出目标包已导出图片名（可操作信息，非匹配）', () => {
+  const idx = projectIndexFixture();
+  const { genPlan } = run([{ op: 'ADD', slot: '完全没登记的图', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.BLOCKED);
+  assert.ok(e.note.includes('reward_icon.png') || e.note.includes('reward_icon'),
+    'note 应列出目标包内已导出的图片名，让小 Q 知道「已有什么」');
+  assert.ok(e.note.includes('package.xml'));
+});
+
 test('③ ADD: exported=false 的资源视为未登记 → blocked', () => {
   const { genPlan } = run([
     { op: 'ADD', slot: '未导出图', node: 'L017' },
