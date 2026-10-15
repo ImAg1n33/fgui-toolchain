@@ -26,10 +26,13 @@ const { runCli, runCliJson } = require('./run-cli');
 const { EXIT } = require('../../src/core/errors');
 const { makeAssets } = require('../fixtures/make-assets');
 const { makePsds } = require('../fixtures/make-psd');
+const { makeFguiProject } = require('../fixtures/make-fgui-project');
 const { readJson, writeJson } = require('../../src/core/fs-json');
 
 const ROOT = path.resolve(__dirname, '../..');
 const GOLDEN = path.join(ROOT, 'test/fixtures/golden');
+/** M1 合成 FGUI 工程（只读基准；缺则现造）。 */
+const FGUI_FIXTURE = path.join(ROOT, 'test/fixtures/fgui-project');
 
 /**
  * 跑一遍完整流水线到指定输出目录。
@@ -542,6 +545,48 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
     assert.throws(
       () => resolveTargetPath(dir, ROOT, 'outside-root/MailDetail.xml', logger),
       (err) => err.code === 'USAGE' && err.exitCode === EXIT.USAGE,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: gen-xml prepare 产出的 target.file 严格等于「工程根相对」路径', () => {
+  // 关键场景：索引在 **--root=仓库根** 下生成（file 相对 rootDir），
+  // 而 --project 指向子目录里的 FGUI 工程 —— 此时 target.file 必须被相对化成工程根相对。
+  if (!fs.existsSync(path.join(FGUI_FIXTURE, 'MailPopup.fairy'))) {
+    makeFguiProject({ outDir: FGUI_FIXTURE });
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-targetfile-'));
+  try {
+    const idx = runCliJson([
+      'project-index', '--root', ROOT, '--project', FGUI_FIXTURE,
+      '--out', dir, '--no-images',
+    ]);
+    assert.equal(idx.code, EXIT.OK, 'project-index 应成功');
+
+    const planPath = path.join(dir, 'change_plan.json');
+    writeJson(planPath, {
+      version: '1.0',
+      task: { name: 'MailDetail', basePkg: 'MailDetail', targetPkg: 'MailDetail' },
+      diffs: [{ op: 'REUSE', slot: 'frame', node: 'L010' }],
+    });
+
+    const prep = runCliJson([
+      'gen-xml', 'prepare', '--root', ROOT,
+      '--plan', planPath,
+      '--project', FGUI_FIXTURE,
+      '--index', path.join(dir, 'project_index.json'),
+      '--out', dir,
+    ]);
+    assert.equal(prep.code, EXIT.OK, `prepare 应成功：${JSON.stringify(prep.json)}`);
+
+    const gp = readJson(path.join(dir, 'gen_plan.json'));
+    // ★ 严格等值，不用 endsWith —— 否则「相对 CLI rootDir」的旧形态也能蒙混过关 ★
+    assert.equal(
+      gp.target.file,
+      'assets/MailDetail/MailDetail.xml',
+      `target.file 必须严格等于工程根相对路径（实测：${JSON.stringify(gp.target.file)}）`,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

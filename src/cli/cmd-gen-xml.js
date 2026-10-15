@@ -184,7 +184,13 @@ function runPrepare(ctx, outDir) {
 
   const { genPlan, exitCode } = buildGenPlan({
     changePlan, projectIndex, baseIr, targetIr, targetContents,
-    options: { skipUnconfirmed },
+    // ★ projectRoot / rootDir 必须显式传 ★
+    //   gen-plan 据此把输出的 `target.file` 相对化成「**FGUI 工程根相对**」形态
+    //   （M2-SPEC §4）。不传则退回 index 原样（相对 CLI rootDir，形如
+    //   `out/<tmp>/project/assets/...`），§4 语义不会真正生效。
+    //   `rootDir` 显式传 ctx.rootDir（而非让 gen-plan 缺省 process.cwd()），更稳。
+    //   注意：targetContents 的键仍是 index 的**原始** file 值（gen-plan 只相对化输出字段）。
+    options: { skipUnconfirmed, projectRoot, rootDir },
   });
 
   const outPath = path.join(outDir, 'gen_plan.json');
