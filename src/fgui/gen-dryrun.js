@@ -33,6 +33,8 @@ const { EXIT } = require('../core/errors');
 const { patchAttrs, insertChild } = require('./xml-patcher');
 const { renderNode } = require('./node-render');
 const { lintComponentXml } = require('./lint-rules');
+const { parseXmlDocument, walkElements } = require('./xml-parse');
+const { parseUiRef } = require('./resource-resolver');
 
 /** unix 风格上下文行数（标准 unified diff 缺省 3）。 */
 const DIFF_CONTEXT = 3;
@@ -98,10 +100,41 @@ function buildLintResources(projectIndex) {
   return map;
 }
 
+/**
+ * 统计一段组件 XML 里可解析的 `ui://` 引用条数（复用解析器 + resource-resolver，
+ * 不另写一套识别逻辑）。
+ *
+ * ★ 为什么需要它 ★（D9 的防静默降级）
+ *   `project-index` 带 `--no-images` 时 resources[].width/height 全为 null →
+ *   buildLintResources 产出空表 → lint 的 R-05/R-10 静默降级（正是 D9 要防的坑）。
+ *   本函数提供的计数用于在「注入表为空却有 ui:// 引用」时发出显式告警。
+ *
+ * @param {string} xmlText
+ * @returns {number}
+ */
+function countUiRefs(xmlText) {
+  if (typeof xmlText !== 'string' || !xmlText) return 0;
+  let parsed;
+  try {
+    parsed = parseXmlDocument(xmlText);
+  } catch {
+    return 0;
+  }
+  if (!parsed.root) return 0;
+  let n = 0;
+  walkElements(parsed.root, (node) => {
+    const attrs = node.attrs || {};
+    for (const attr of Object.keys(attrs)) {
+      const v = attrs[attr];
+      if (typeof v === 'string' && v.includes('ui://') && parseUiRef(v)) n += 1;
+    }
+  });
+  return n;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 行级 unified diff（自写 LCS，零依赖 —— D10）
 // ════════════════════════════════════════════════════════════════════════════
-
 /** LCS DP 的行数上限（超过则退化为整体替换；组件 XML 远小于此）。 */
 const DIFF_MAX_LINES = 4000;
 
@@ -304,6 +337,10 @@ function runDryrun(input = {}) {
 
   /** @type {string[]} */
   const topErrors = [];
+  /** @type {Object[]} 顶层非致命告警（如 lint 资源注入表为空 —— D9 防静默降级） */
+  const reportWarnings = [];
+  /** resources 注入表是否为空（空则 R-05/R-10 会降级，需告警） */
+  const resourcesEmpty = Object.keys(lintResources).length === 0;
   /** @type {Object[]} */
   const files = [];
   let entriesApplied = 0;
@@ -321,6 +358,7 @@ function runDryrun(input = {}) {
           filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, lintErrors: 0,
         },
         errors: topErrors,
+        warnings: reportWarnings,
       },
     };
   }
@@ -370,6 +408,7 @@ function runDryrun(input = {}) {
           filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, lintErrors: 0,
         },
         errors: topErrors,
+        warnings: reportWarnings,
       },
     };
   }
@@ -430,6 +469,24 @@ function runDryrun(input = {}) {
     if (errs.length) lintBlocked = true;
     lintErrorCount += errs.length;
 
+    const lintWarns = (lint.warnings || []).map((w) => ({ rule: w.rule, message: w.message, line: w.line }));
+
+    // ★ D9 防静默降级 ★：resources 注入表为空 + 文本里有 ui:// 引用
+    //   → R-05/R-10 会静默降级（典型成因：project-index 带 --no-images 跑，
+    //     width/height 全 null）。这里发显式 warning，**不改变退出码**
+    //     （不带图索引是用户的构建选择，不是错误）。
+    if (resourcesEmpty) {
+      const uiRefCount = countUiRefs(after);
+      if (uiRefCount > 0) {
+        const msg = `lint 资源注入表为空（project_index.resources 的 width/height 全为 null —— `
+          + '可能 project-index 未带图运行），但本文件有 ' + uiRefCount + ' 处 ui:// 引用：'
+          + 'R-05（scale9grid 边界对账）与 R-10（九宫格适用性）已降级为「仅格式校验」。'
+          + '补全资源信息（去掉 --no-images 重跑 project-index）可获得完整对账';
+        lintWarns.push({ rule: 'LINT_RESOURCES_EMPTY', message: msg, line: null });
+        reportWarnings.push({ file: t.file, code: 'LINT_RESOURCES_EMPTY', uiRefCount, message: msg });
+      }
+    }
+
     // 该文件的跳过条目：单目标时全归它；多目标时按 entry.file 归属
     const fileSkips = skippedEntries.filter((s) => {
       const e = entries.find((x) => x && x.op === s.op && (x.slot === s.slot) && (x.nodeId || null) === s.nodeId);
@@ -445,7 +502,7 @@ function runDryrun(input = {}) {
       status: errs.length ? 'lint-blocked' : 'ok',
       lint: {
         errors: errs,
-        warnings: (lint.warnings || []).map((w) => ({ rule: w.rule, message: w.message, line: w.line })),
+        warnings: lintWarns,
       },
       diff: formatUnifiedDiff(before, after, { path: t.file }),
       skippedEntries: fileSkips,
@@ -467,12 +524,14 @@ function runDryrun(input = {}) {
       lintErrors: lintErrorCount,
     },
     errors: topErrors,
+    warnings: reportWarnings,
   };
   return { report, exitCode };
 }
 
 module.exports = {
   runDryrun,
+  countUiRefs,
   sha256,
   buildLintResources,
   formatUnifiedDiff,

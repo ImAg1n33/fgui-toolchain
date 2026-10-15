@@ -215,3 +215,45 @@ test('dryrun: 确定性 —— 同输入两次运行 JSON 逐字节一致，且�
   // 报告里不得出现时间戳形态（ISO 8601）
   assert.ok(!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(JSON.stringify(r1.report)), '报告含时间戳');
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+test('dryrun: D9 防静默降级 —— 资源注入表为空且有 ui:// 引用 → LINT_RESOURCES_EMPTY 告警（不改退出码）', () => {
+  const content = readTarget(); // MailDetail.xml，含多处 ui:// 引用
+  const plan = {
+    version: '1.0',
+    target: { file: FILE, sha256: sha256(content) },
+    entries: [],
+  };
+
+  // (a) width/height 全 null（典型成因：project-index 带 --no-images 跑）→ 有告警
+  const emptyRes = {
+    resources: [
+      { pkgId: 'e5f6a7b8', id: 'a7b8c9d0', name: 'reward_icon.png', width: null, height: null },
+    ],
+  };
+  const a = runDryrun({ genPlan: plan, projectIndex: emptyRes, targetContents: { [FILE]: content } });
+  assert.equal(a.exitCode, 0, '只告警不改退出码');
+  const wTop = a.report.warnings.find((w) => w.code === 'LINT_RESOURCES_EMPTY');
+  assert.ok(wTop, '顶层 report.warnings 应含 LINT_RESOURCES_EMPTY');
+  assert.ok(wTop.uiRefCount >= 1, 'warning 应带 ui:// 引用条数');
+  assert.ok(
+    a.report.files[0].lint.warnings.some((w) => w.rule === 'LINT_RESOURCES_EMPTY'),
+    'files[].lint.warnings 应含该告警（md 报告据此可见）',
+  );
+
+  // (b) resources 有尺寸 → 不出现该告警
+  const fullRes = {
+    resources: [
+      { pkgId: 'e5f6a7b8', id: 'a7b8c9d0', name: 'reward_icon.png', width: 96, height: 96 },
+    ],
+  };
+  const b = runDryrun({ genPlan: plan, projectIndex: fullRes, targetContents: { [FILE]: content } });
+  assert.ok(!b.report.warnings.some((w) => w.code === 'LINT_RESOURCES_EMPTY'), '有资源时不应告警');
+  assert.ok(!b.report.files[0].lint.warnings.some((w) => w.rule === 'LINT_RESOURCES_EMPTY'));
+
+  // (c) 无 ui:// 引用的文本 + 空资源 → 也不告警（避免噪声）
+  const noRef = ['<?xml version="1.0" encoding="utf-8"?>', '<component size="10,10">', '  <displayList>', '    <graph id="b00001" name="g" xy="0,0" size="10,10"/>', '  </displayList>', '</component>', ''].join('\n');
+  const planNoRef = { version: '1.0', target: { file: FILE, sha256: sha256(noRef) }, entries: [] };
+  const c = runDryrun({ genPlan: planNoRef, projectIndex: emptyRes, targetContents: { [FILE]: noRef } });
+  assert.ok(!c.report.warnings.some((w) => w.code === 'LINT_RESOURCES_EMPTY'), '无 ui:// 引用时不应告警');
+});
