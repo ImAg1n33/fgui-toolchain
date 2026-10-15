@@ -244,18 +244,28 @@ function toSkipRecord(entry) {
 
 /**
  * 对一段 XML 文本套用单个 resolved 条目。
+ *
  * @param {string} text
  * @param {Object} entry
+ * @param {string[]} [notes] 收集器：记录「非静默」的处理说明
  * @returns {string} 新文本
  * @throws {AppError} 定位/插入失败
  */
-function applyEntry(text, entry) {
+function applyEntry(text, entry, notes) {
   const patch = entry.patch || {};
   // ADD：{ tag, attrs, after }
   if (patch.tag) {
     const rendered = renderNode({ tag: patch.tag, attrs: patch.attrs || {} });
-    const parentLoc = patch.after ? { id: patch.after } : { tag: 'displayList' };
-    return insertChild(text, parentLoc, rendered);
+    // ★ M2-SPEC §9：不推断 z-order —— ADD 一律追加到 displayList 末尾。★
+    //   `after` 是「同级锚点」语义（§4：after=null → displayList 末尾），
+    //   而 xml-patcher.insertChild 只支持「父容器末尾追加」；M2 不做 z-order，
+    //   故 after 仅作人可读提示、不参与定位 —— 在 report 里显式记一条 note，
+    //   绝不静默丢弃（团队纪律：blocked/skipped/忽略都要可见）。
+    if (notes && patch.after !== undefined && patch.after !== null) {
+      notes.push(`ADD(op=${entry.op || '?'} slot=${entry.slot || '?'}) 已按 M2-SPEC §9 追加到 displayList 末尾`
+        + `（忽略 z-order 锚点 after=${patch.after}；M2 不推断 z-order）`);
+    }
+    return insertChild(text, { tag: 'displayList' }, rendered);
   }
   // 多属性：{ attrs: { color, alpha } }
   if (patch.attrs && typeof patch.attrs === 'object') {
@@ -348,6 +358,7 @@ function runDryrun(input = {}) {
         lint: null,
         diff: '',
         skippedEntries: [],
+        notes: [],
       });
     }
     return {
@@ -373,7 +384,9 @@ function runDryrun(input = {}) {
   // 先把每个文件的工作文本准备好
   /** @type {Map<string,string>} */
   const work = new Map();
-  for (const t of targets) work.set(t.file, contents[t.file]);
+  /** @type {Map<string,string[]>} 每文件的非静默处理说明 */
+  const fileNotes = new Map();
+  for (const t of targets) { work.set(t.file, contents[t.file]); fileNotes.set(t.file, []); }
 
   for (const entry of entries) {
     if (entry && entry.status === 'resolved') {
@@ -384,7 +397,8 @@ function runDryrun(input = {}) {
         continue;
       }
       try {
-        const next = applyEntry(work.get(file), entry);
+        const notes = fileNotes.get(file);
+        const next = applyEntry(work.get(file), entry, notes);
         work.set(file, next);
         appliedEntries.push({ op: entry.op || null, slot: entry.slot === undefined ? null : entry.slot, nodeId: entry.nodeId === undefined ? null : entry.nodeId });
         entriesApplied += 1;
@@ -435,6 +449,7 @@ function runDryrun(input = {}) {
       },
       diff: formatUnifiedDiff(before, after, { path: t.file }),
       skippedEntries: fileSkips,
+      notes: fileNotes.get(t.file) || [],
     });
   }
 
