@@ -253,6 +253,11 @@ function renderDryrunMarkdown(report) {
     for (const e of report.errors) lines.push(`- ${e}`);
     lines.push('');
   }
+  if (report.warnings && report.warnings.length) {
+    lines.push('## 告警', '');
+    for (const w of report.warnings) lines.push(`- [${w.code}] ${w.message}`);
+    lines.push('');
+  }
   for (const f of report.files) {
     lines.push(`## ${f.file}`, '');
     lines.push(`- status: ${f.status}  changed: ${f.changed}`);
@@ -261,6 +266,10 @@ function renderDryrunMarkdown(report) {
     if (f.lint && f.lint.errors.length) {
       lines.push('- lint errors:');
       for (const e of f.lint.errors) lines.push(`  - [${e.rule}] ${e.message} (line ${e.line})`);
+    }
+    if (f.lint && f.lint.warnings && f.lint.warnings.length) {
+      lines.push('- lint warnings:');
+      for (const w of f.lint.warnings) lines.push(`  - [${w.rule}] ${w.message}`);
     }
     if (f.notes && f.notes.length) {
       lines.push('- notes:');
@@ -308,6 +317,7 @@ function runDryrunPhase(ctx, outDir) {
     summary: report.summary,
     files: report.files.map((f) => ({ file: f.file, status: f.status, changed: f.changed })),
     errors: report.errors || [],
+    warnings: report.warnings || [],
   }, null, 2)}\n`);
   return exitCode;
 }
