@@ -630,32 +630,70 @@ const ADD_TAG_BY_TYPE = Object.freeze({ text: 'text', group: 'group', raster: 'i
  *   与 fgui.config.json 的 normalize 段同默认值；`options.normalize` 可覆盖。
  */
 const DEFAULT_NORM_OPTS = Object.freeze({
-  stripCopySuffix: true, stripExtension: true, useVariants: true,
+  // ★ stripCopySuffix 刻意 **false** ★
+  //   package.xml 里 `reward_icon.png` 与 `reward_icon(1).png` 是**两个不同的
+  //   资源条目**（画师副本），各自有独立 id。若归一化时剥掉副本后缀，
+  //   slot='reward_icon' 会同时命中两者 —— 进而「静默绑到其中一个」。
+  //   资源解析必须**只去扩展名/大小写/繁简**，绝不能把副本当成同一个资源。
+  stripCopySuffix: false, stripExtension: true, useVariants: true,
+});
+
+/** 资源匹配结果状态。 */
+const RESOURCE_MATCH = Object.freeze({
+  EXACT: 'exact',           // 精确 name/id 全等命中
+  NORMALIZED: 'normalized', // 归一化后**唯一**全等命中
+  AMBIGUOUS: 'ambiguous',   // 归一化后 ≥2 候选 —— 不猜，交人
+  NONE: 'none',             // 未登记 / 未 exported
 });
 
 /**
- * 在目标包的资源里找已登记且 exported 的图片（D3）。
+ * 在目标包的资源里匹配图片（D3）。
  *
- * 两级匹配（先精确、后归一化全等），命中即返回；**绝不前缀/子串匹配**（K5）。
+ * ★ 三条纪律（防「静默绑错资源」）★
+ *   1. **精确优先**：先按 name/id 全等匹配，命中即用；
+ *   2. **归一化兜底必须唯一**：去扩展名/大小写/繁简后全等，**只在一个候选
+ *      时才绑定**；
+ *   3. **≥2 候选不猜**：归一后出现多候选 → 返回 `ambiguous` 与候选清单，
+ *      由调用方转为 blocked + 可读 note（绝不取第一个）。
+ *   全程**不做前缀/子串匹配**（K5）。
  *
  * @param {Object} projectIndex
  * @param {string} targetPkg
  * @param {string[]} keys 候选名（slot / normName / baseName）
  * @param {Object} [normOpts] 透传 normalizeName
- * @returns {Object|null}
+ * @returns {{match:Object|null, status:string, candidates:string[]}}
  */
 function findExportedResource(projectIndex, targetPkg, keys, normOpts) {
   const res = Array.isArray(projectIndex && projectIndex.resources) ? projectIndex.resources : [];
   const opts = normOpts && typeof normOpts === 'object' ? normOpts : DEFAULT_NORM_OPTS;
   const wanted = keys.filter((k) => typeof k === 'string' && k.trim());
-  if (!wanted.length) return null;
+  if (!wanted.length) return { match: null, status: RESOURCE_MATCH.NONE, candidates: [] };
+
   const inPkg = res.filter((r) => r && r.pkg === targetPkg && r.exported);
+
   // ① 精确：name 或 id 全等
   const exact = inPkg.find((r) => wanted.includes(r.name) || wanted.includes(String(r.id)));
-  if (exact) return exact;
-  // ② 归一化后全等（去扩展名/大小写等；仍是全等，非子串）
+  if (exact) {
+    return { match: exact, status: RESOURCE_MATCH.EXACT, candidates: [String(exact.name || exact.id)] };
+  }
+
+  // ② 归一化后全等 —— **必须唯一命中**
   const wantedNorm = new Set(wanted.map((k) => normalizeName(k, opts)));
-  return inPkg.find((r) => r.name && wantedNorm.has(normalizeName(String(r.name), opts))) || null;
+  const hits = inPkg.filter((r) => r.name && wantedNorm.has(normalizeName(String(r.name), opts)));
+  if (hits.length === 1) {
+    return {
+      match: hits[0], status: RESOURCE_MATCH.NORMALIZED, candidates: [String(hits[0].name)],
+    };
+  }
+  if (hits.length > 1) {
+    // ★ 不猜：多候选一律交人 ★
+    return {
+      match: null,
+      status: RESOURCE_MATCH.AMBIGUOUS,
+      candidates: hits.map((r) => String(r.name)),
+    };
+  }
+  return { match: null, status: RESOURCE_MATCH.NONE, candidates: [] };
 }
 
 /**
@@ -726,23 +764,35 @@ function classifyAdd(a, entry) {
   const attrs = {};
   if (tag === 'image') {
     const keys = [entry.slot, diff.normName, diff.baseName].filter((k) => typeof k === 'string' && k);
-    const res = findExportedResource(projectIndex, targetPkg, keys, a.normOpts);
-    if (!res) {
+    const hit = findExportedResource(projectIndex, targetPkg, keys, a.normOpts);
+    if (!hit.match) {
       // ★ blocked 也要可操作：列出目标包内已导出的图片名（纯信息，不参与匹配）★
       const available = listExportedImageNames(projectIndex, targetPkg);
+      const keysText = JSON.stringify(keys.filter(Boolean));
+      // ★ 区分「未登记」与「归一化多候选」—— 后者是**工程里有同名资源**，
+      //   绝不许取第一个（那会静默绑定到错误的资源），必须让小 Q 自己定 ★
+      const ambiguous = hit.status === RESOURCE_MATCH.AMBIGUOUS;
       entry.status = STATUS.BLOCKED;
-      entry.note = `图片资源 ${JSON.stringify(keys.filter(Boolean))} 未在目标包 package.xml 中登记/未 exported`
-        + ' —— 需先导入素材并登记 package.xml（本工具**永不自动修改** package.xml，PRD R4-F6），'
-        + '登记后重跑 prepare'
-        + (available.length
-          ? `。目标包内已导出的图片：${available.join(', ')}（如目标资源已在此列，请把 change_plan 的 slot 改成与资源名一致）`
-          : '。目标包内当前**没有任何**已导出的图片资源');
+      entry.note = ambiguous
+        ? `图片资源 ${keysText} 在目标包 package.xml 里归一化后命中 ${hit.candidates.length} 个候选`
+          + `（${hit.candidates.join(', ')}）—— 多个资源同名，**禁止自动取第一个**`
+          + '（否则会静默绑到错误的资源）。请把 change_plan 的 slot 改成与资源名完全一致后重跑 prepare'
+        : `图片资源 ${keysText} 未在目标包 package.xml 中登记/未 exported`
+          + ' —— 需先导入素材并登记 package.xml（本工具**永不自动修改** package.xml，PRD R4-F6），'
+          + '登记后重跑 prepare'
+          + (available.length
+            ? `。目标包内已导出的图片：${available.join(', ')}（如目标资源已在此列，请把 change_plan 的 slot 改成与资源名一致）`
+            : '。目标包内当前**没有任何**已导出的图片资源');
       warnings.push({
-        code: 'ADD_RESOURCE_NOT_REGISTERED', op: 'ADD', slot: entry.slot, node: entry.node,
-        msg: `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
+        code: ambiguous ? 'ADD_RESOURCE_AMBIGUOUS' : 'ADD_RESOURCE_NOT_REGISTERED',
+        op: 'ADD', slot: entry.slot, node: entry.node,
+        msg: ambiguous
+          ? `ADD 条目 slot='${entry.slot}' 命中多个同名资源（${hit.candidates.join(', ')}）—— 不猜，已 blocked`
+          : `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
       });
       return entry;
     }
+    const res = hit.match;
     const pkgId = a.pkgId;
     if (pkgId) {
       attrs.src = `ui://${pkgId}/${res.id}`;
@@ -900,6 +950,7 @@ module.exports = {
   createIdAllocator,
   findExportedResource,
   listExportedImageNames,
+  RESOURCE_MATCH,
   summarize,
   GEN_PLAN_VERSION,
   DEFAULT_NORM_OPTS,

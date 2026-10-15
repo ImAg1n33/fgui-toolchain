@@ -18,7 +18,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  buildGenPlan, isUnconfirmed, evaluateGate, createIdAllocator, sha256Hex, STATUS,
+  buildGenPlan, isUnconfirmed, evaluateGate, createIdAllocator, sha256Hex,
+  findExportedResource, STATUS,
 } = require('../../src/fgui/gen-plan');
 const { planNeedsHuman } = require('../../src/diff/planner');
 const { EXIT, AppError } = require('../../src/core/errors');
@@ -308,6 +309,78 @@ test('③ ADD: blocked 时 note 列出目标包已导出图片名（可操作信
   assert.ok(e.note.includes('reward_icon.png') || e.note.includes('reward_icon'),
     'note 应列出目标包内已导出的图片名，让小 Q 知道「已有什么」');
   assert.ok(e.note.includes('package.xml'));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ③-b 资源匹配三条纪律（防「静默绑错资源」）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('③-b-1 归一化兜底唯一命中才绑定（reward_icon ↔ reward_icon.png）', () => {
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
+  assert.equal(hit.status, 'normalized', '应走归一化兜底');
+  assert.ok(hit.match && hit.match.id === 'r0001', '唯一候选必须绑定');
+  assert.deepEqual(hit.candidates, ['reward_icon.png']);
+});
+
+test('③-b-2 ★ 归一化后 ≥2 候选 → 不猜，返回 ambiguous 且不绑定（ADD 转 blocked）', () => {
+  // 两个资源归一化后同名：`reward_icon.png` 与 `reward_icon.jpg`（真实现象：
+  // 同一素材的两种格式都登记了）。取任何一个都可能是错的资源。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0002', name: 'reward_icon.jpg', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
+  assert.equal(hit.status, 'ambiguous');
+  assert.equal(hit.match, null, '★ 多候选绝不许绑定（静默绑错资源）');
+  assert.equal(hit.candidates.length, 2);
+
+  // 经 buildGenPlan：ADD 必须 blocked，note 点名候选 + 说明不猜
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.BLOCKED);
+  assert.ok(e.note.includes('reward_icon.png') && e.note.includes('reward_icon.jpg'),
+    'note 应列出全部候选');
+  assert.ok(e.note.includes('禁止自动取第一个') || e.note.includes('不猜'),
+    'note 应说明为什么不猜');
+  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_AMBIGUOUS'));
+});
+
+test('③-b-3 精确匹配优先：存在同名精确资源时不走归一化候选', () => {
+  // slot='reward_icon' 精确命中 id 为 r0009 的资源（name 就叫 reward_icon，无扩展名），
+  // 同时还有 reward_icon.png（r0001）。精确优先 → 必须绑 r0009。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0009', name: 'reward_icon', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
+  assert.equal(hit.status, 'exact', '应精确命中');
+  assert.equal(hit.match.id, 'r0009', '★ 精确优先于归一化候选（否则会绑错资源）');
+});
+
+test('③-b-4 副本资源不被归一化吞掉（stripCopySuffix=false）', () => {
+  // `reward_icon(1).png` 是画师副本，是**另一个**资源条目；
+  // 归一化若剥副本后缀，slot='reward_icon' 会把它与正本混同（可能 ≥2 候选或绑错）。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0008', name: 'reward_icon(1).png', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
+  assert.equal(hit.status, 'normalized', '副本不应与正本归一化为同一名');
+  assert.equal(hit.match.id, 'r0001', '★ 必须绑正本，绝不能被副本(1)干扰');
 });
 
 test('③ ADD: exported=false 的资源视为未登记 → blocked', () => {
