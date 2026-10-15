@@ -510,13 +510,19 @@ test('★ CLI: 日志走 stderr、产物走 stdout（ARCHITECTURE §8.2）', (t)
   }
 });
 
-test('CLI: gen-xml 诚实上报「未实现 + 缺什么」', () => {
-  const res = runCliJson(['gen-xml']);
-  assert.equal(res.json.implemented, false);
-  assert.equal(res.json.status, 'P1_STUB');
-  assert.ok(res.json.blockedBy.length >= 5, '应列出被小 Q 阻塞的问题');
-  assert.ok(res.json.upstreamPitfalls.length >= 5, '应复述上游踩坑清单');
-  assert.equal(res.code, EXIT.USAGE);
+test('CLI: gen-xml 三阶段分发（usage 分支）', () => {
+  // 无阶段参数 → 打印用法 + EXIT.USAGE；stdout 仍是纯 JSON
+  const r1 = runCliJson(['gen-xml']);
+  assert.equal(r1.code, EXIT.USAGE);
+  assert.equal(r1.json.command, 'gen-xml');
+  assert.equal(r1.json.ok, false);
+  assert.ok(/prepare \| dryrun \| apply/.test(r1.stderr), '用法应打印到 stderr');
+
+  // prepare 缺 --plan → EXIT.USAGE；stdout 仍是纯 JSON
+  const r2 = runCliJson(['gen-xml', 'prepare']);
+  assert.equal(r2.code, EXIT.USAGE);
+  assert.equal(r2.json.ok, false);
+  assert.ok(/--plan/.test(r2.json.error), '错误信息应指明缺 --plan');
 });
 
 test('CLI: psd-ir 支持多份一次解析（R2-F7）', (t) => {
