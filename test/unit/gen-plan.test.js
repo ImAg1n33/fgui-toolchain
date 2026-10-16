@@ -325,7 +325,8 @@ test('③-b-1 归一化兜底唯一命中才绑定（reward_icon ↔ reward_icon
   const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
   assert.equal(hit.status, 'normalized', '应走归一化兜底');
   assert.ok(hit.match && hit.match.id === 'r0001', '唯一候选必须绑定');
-  assert.deepEqual(hit.candidates, ['reward_icon.png']);
+  // 候选统一用 `name#id` 标签（便于人工定位；P1-2 起）
+  assert.deepEqual(hit.candidates, ['reward_icon.png#r0001']);
 });
 
 test('③-b-2 ★ 归一化后 ≥2 候选 → 不猜，返回 ambiguous 且不绑定（ADD 转 blocked）', () => {
@@ -382,6 +383,103 @@ test('③-b-4 副本资源不被归一化吞掉（stripCopySuffix=false）', () 
   const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
   assert.equal(hit.status, 'normalized', '副本不应与正本归一化为同一名');
   assert.equal(hit.match.id, 'r0001', '★ 必须绑正本，绝不能被副本(1)干扰');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ③-c P1-2：精确分支唯一性 + 类型限定
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P1-2-B: slot 与资源名**完全相等**且同名两个 → ambiguous（精确分支不得取第一个）', () => {
+  // 原实现：精确分支用 find() 静默取第一个（归一化分支才有唯一性守卫）。
+  // 把 src/fgui/gen-plan.js 的「按 name 精确唯一」改回 find() → 本测试必红。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'aaaa0001', name: 'reward_icon', exported: true },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'aaaa0002', name: 'reward_icon', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
+  assert.equal(hit.status, 'ambiguous', '★ 精确同名多候选必须 ambiguous');
+  assert.equal(hit.match, null, '★ 绝不取第一个');
+  assert.deepEqual(hit.candidates, ['reward_icon#aaaa0001', 'reward_icon#aaaa0002'],
+    '候选必须列全（name#id）');
+
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.BLOCKED);
+  assert.equal(e.patch, null);
+  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_AMBIGUOUS'));
+  assert.ok(e.note.includes('aaaa0001') && e.note.includes('aaaa0002'), 'note 应列出两个候选 id');
+});
+
+test('★ P1-2-A: 同名 component + image → 必须绑到 image（原来会绑 component）', () => {
+  // 原实现 inPkg 未过滤 type → 精确分支可能绑到同名 component，生成指向非图片的 src。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'component', id: 'cccc0001', name: 'reward_icon', exported: true },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'aaaa0001', name: 'reward_icon', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon'], undefined, { type: 'image' });
+  assert.equal(hit.status, 'exact');
+  assert.equal(hit.match.id, 'aaaa0001', '★ 必须绑图片资源（id 前缀 aaaa），不得绑 component');
+  assert.equal(hit.match.type, 'image');
+
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  assert.equal(genPlan.entries[0].status, STATUS.RESOLVED);
+  assert.equal(genPlan.entries[0].patch.attrs.src, 'ui://e5f6a7b8/aaaa0001');
+});
+
+test('★ P1-2-A2: 同名只有非图片类型 → blocked + ADD_RESOURCE_TYPE_MISMATCH（不静默落到 NONE）', () => {
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'component', id: 'cccc0001', name: 'reward_icon', exported: true },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon'], undefined, { type: 'image' });
+  assert.equal(hit.status, 'type_mismatch', '★ 同名但类型不符要给出区分性状态');
+  assert.equal(hit.match, null);
+  assert.ok(hit.candidates.some((c) => c.includes('type=component')), '候选应带类型信息');
+
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.BLOCKED);
+  assert.equal(e.patch, null);
+  assert.ok(e.note.includes('类型'), 'note 应说明类型不符');
+  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_TYPE_MISMATCH'),
+    '★ 必须用独立的 ADD_RESOURCE_TYPE_MISMATCH（与「未登记」区分）');
+});
+
+test('★ P1-2 正例保留: reward_icon ↔ reward_icon.png 命中；图层249 与 图层249(1) 并存不混', () => {
+  // 正例 1：去扩展名归一化仍能唯一命中
+  const a = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: true },
+    ],
+  });
+  const h1 = findExportedResource(a, 'Mail', ['reward_icon']);
+  assert.equal(h1.status, 'normalized');
+  assert.equal(h1.match.id, 'r0001');
+
+  // 正例 2：中文名 + 副本后缀并存（stripCopySuffix=false）→ 仍唯一命中正本
+  const b = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0007', name: '图层249.png', exported: true },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0008', name: '图层249(1).png', exported: true },
+    ],
+  });
+  const h2 = findExportedResource(b, 'Mail', ['图层249']);
+  assert.equal(h2.status, 'normalized', '副本不并入正本 → 仍唯一命中');
+  assert.equal(h2.match.id, 'r0007', '绑正本');
 });
 
 test('③ ADD: exported=false 的资源 → blocked，且用 NOT_EXPORTED 专属 code（不是「未登记」）', () => {

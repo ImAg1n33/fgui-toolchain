@@ -669,9 +669,10 @@ function isExported(v) {
 
 /** 资源匹配结果状态。 */
 const RESOURCE_MATCH = Object.freeze({
-  EXACT: 'exact',           // 精确 name/id 全等命中
+  EXACT: 'exact',           // 按 id 或 name 精确全等，**且唯一**命中
   NORMALIZED: 'normalized', // 归一化后**唯一**全等命中
-  AMBIGUOUS: 'ambiguous',   // 归一化后 ≥2 候选 —— 不猜，交人
+  AMBIGUOUS: 'ambiguous',   // 多候选（精确或归一）—— 不猜，交人
+  TYPE_MISMATCH: 'type_mismatch', // 名字/id 对得上、也已导出，但**类型不是图片**
   NOT_EXPORTED: 'not_exported', // 名字/id 对得上，但 exported 不是 true —— 不绑定
   NONE: 'none',             // 未登记
 });
@@ -679,63 +680,79 @@ const RESOURCE_MATCH = Object.freeze({
 /**
  * 在目标包的资源里匹配图片（D3）。
  *
- * ★ 三条纪律（防「静默绑错资源」）★
- *   1. **精确优先**：先按 name/id 全等匹配，命中即用；
- *   2. **归一化兜底必须唯一**：去扩展名/大小写/繁简后全等，**只在一个候选
- *      时才绑定**；
- *   3. **≥2 候选不猜**：归一后出现多候选 → 返回 `ambiguous` 与候选清单，
- *      由调用方转为 blocked + 可读 note（绝不取第一个）。
+ * ★ 五条纪律（防「静默绑错资源」；P1-2 修复后）★
+ *   0. **类型限定**：图片 ADD 只允许匹配 `type === 'image'` 的资源 ——
+ *      否则会同名绑到 component 等**非图片**资源，生成指向错误东西的 `src`；
+ *   1. **按 id 精确唯一**：恰好 1 条才 resolve，>1 条（理论不该发生）交人；
+ *   2. **按 name 精确唯一**：恰好 1 条才 resolve，**>1 条 → ambiguous（绝不取第一个）**；
+ *   3. **归一化兜底唯一**：去扩展名/大小写/繁简后全等，只在一个候选时绑定；
+ *   4. **未命中要能区分原因**：类型不符 / 未导出 / 未登记 —— 三者给用户的行动不同。
  *   全程**不做前缀/子串匹配**（K5）。
  *
  * @param {Object} projectIndex
  * @param {string} targetPkg
  * @param {string[]} keys 候选名（slot / normName / baseName）
  * @param {Object} [normOpts] 透传 normalizeName
+ * @param {Object} [opts]
+ * @param {string} [opts.type='image'] 要求的资源类型（ADD 的图片场景恒为 image）
  * @returns {{match:Object|null, status:string, candidates:string[]}}
  */
-function findExportedResource(projectIndex, targetPkg, keys, normOpts) {
+function findExportedResource(projectIndex, targetPkg, keys, normOpts, opts) {
   const res = Array.isArray(projectIndex && projectIndex.resources) ? projectIndex.resources : [];
-  const opts = normOpts && typeof normOpts === 'object' ? normOpts : DEFAULT_NORM_OPTS;
+  const nopts = normOpts && typeof normOpts === 'object' ? normOpts : DEFAULT_NORM_OPTS;
+  const wantType = (opts && opts.type) || 'image';
   const wanted = keys.filter((k) => typeof k === 'string' && k.trim());
   if (!wanted.length) return { match: null, status: RESOURCE_MATCH.NONE, candidates: [] };
 
-  // ★ BUG-A：必须用 isExported（exported 是字符串 "true"/"false"，真值判断会放行 "false"）★
-  const inPkg = res.filter((r) => r && r.pkg === targetPkg && isExported(r.exported));
+  const allInPkg = res.filter((r) => r && r.pkg === targetPkg);
+  // ★ 类型限定：图片只能匹配图片（否则会绑到同名 component 等）★
+  const inPkg = allInPkg.filter((r) => isExported(r.exported) && r.type === wantType);
 
-  // ① 精确：name 或 id 全等
-  const exact = inPkg.find((r) => wanted.includes(r.name) || wanted.includes(String(r.id)));
-  if (exact) {
-    return { match: exact, status: RESOURCE_MATCH.EXACT, candidates: [String(exact.name || exact.id)] };
-  }
+  const label = (r) => `${r.name}#${r.id}`;
+  const ambiguousOf = (hits) => ({
+    match: null, status: RESOURCE_MATCH.AMBIGUOUS, candidates: hits.map(label),
+  });
 
-  // ② 归一化后全等 —— **必须唯一命中**
-  const wantedNorm = new Set(wanted.map((k) => normalizeName(k, opts)));
-  const hits = inPkg.filter((r) => r.name && wantedNorm.has(normalizeName(String(r.name), opts)));
-  if (hits.length === 1) {
-    return {
-      match: hits[0], status: RESOURCE_MATCH.NORMALIZED, candidates: [String(hits[0].name)],
-    };
+  // ① 按 id 精确 —— 必须唯一
+  const byId = inPkg.filter((r) => wanted.includes(String(r.id)));
+  if (byId.length === 1) {
+    return { match: byId[0], status: RESOURCE_MATCH.EXACT, candidates: [label(byId[0])] };
   }
-  if (hits.length > 1) {
-    // ★ 不猜：多候选一律交人 ★
+  if (byId.length > 1) return ambiguousOf(byId); // id 理论上唯一；守门，绝不取第一个
+
+  // ② 按 name 精确 —— 必须唯一（P1-2 问题 B：原实现 find() 静默取第一个）
+  const byName = inPkg.filter((r) => wanted.includes(r.name));
+  if (byName.length === 1) {
+    return { match: byName[0], status: RESOURCE_MATCH.EXACT, candidates: [label(byName[0])] };
+  }
+  if (byName.length > 1) return ambiguousOf(byName); // ★ 不猜：同名多资源一律交人
+
+  // ③ 归一化后全等 —— 必须唯一
+  const wantedNorm = new Set(wanted.map((k) => normalizeName(k, nopts)));
+  const normHits = inPkg.filter((r) => r.name && wantedNorm.has(normalizeName(String(r.name), nopts)));
+  if (normHits.length === 1) {
+    return { match: normHits[0], status: RESOURCE_MATCH.NORMALIZED, candidates: [label(normHits[0])] };
+  }
+  if (normHits.length > 1) return ambiguousOf(normHits);
+
+  // ④ 未命中 —— 区分原因（类型不符 / 未导出 / 未登记），三者行动不同
+  const nameOrIdLike = (r) => wanted.includes(r.name) || wanted.includes(String(r.id))
+    || (r.name && wantedNorm.has(normalizeName(String(r.name), nopts)));
+  const matched = allInPkg.filter(nameOrIdLike);
+  // ④-a 名字对得上、已导出，但类型不是图片（P1-2 问题 A 的可操作信号）
+  const wrongType = matched.filter((r) => isExported(r.exported) && r.type !== wantType);
+  if (wrongType.length) {
     return {
       match: null,
-      status: RESOURCE_MATCH.AMBIGUOUS,
-      candidates: hits.map((r) => String(r.name)),
+      status: RESOURCE_MATCH.TYPE_MISMATCH,
+      candidates: wrongType.map((r) => `${r.name}(type=${r.type === undefined ? '??' : r.type})`),
     };
   }
-
-  // ③ 没命中 —— 区分「未登记」与「登记了但未 exported」：
-  //    给用户的行动不同（前者「先导入素材」/ 后者「去 package.xml 标成导出」），
-  //    故必须在**未过 exported 过滤**的集合里再找一次。
-  const notExported = res.filter((r) => r && r.pkg === targetPkg && !isExported(r.exported)
-    && ((wanted.includes(r.name) || wanted.includes(String(r.id)))
-      || (r.name && wantedNorm.has(normalizeName(String(r.name), opts)))));
+  // ④-b 名字对得上但未导出
+  const notExported = matched.filter((r) => !isExported(r.exported));
   if (notExported.length) {
     return {
-      match: null,
-      status: RESOURCE_MATCH.NOT_EXPORTED,
-      candidates: notExported.map((r) => String(r.name || r.id)),
+      match: null, status: RESOURCE_MATCH.NOT_EXPORTED, candidates: notExported.map((r) => String(r.name || r.id)),
     };
   }
   return { match: null, status: RESOURCE_MATCH.NONE, candidates: [] };
@@ -767,7 +784,8 @@ function listExportedImageNames(projectIndex, targetPkg, limit) {
  *   · type=smartobject → 无对应节点类型；
  *   · image 资源**未登记** → 先导入素材并登记 package.xml（`ADD_RESOURCE_NOT_REGISTERED`）；
  *   · image 资源**已登记但未 exported** → 去 package.xml 标成导出（`ADD_RESOURCE_NOT_EXPORTED`，BUG-A）；
- *   · image 资源**多候选**（归一后同名）→ 不猜（`ADD_RESOURCE_AMBIGUOUS`）；
+ *   · image 资源**同名但类型不是图片** → 确认素材类型/导入正确图片（`ADD_RESOURCE_TYPE_MISMATCH`，P1-2）；
+ *   · image 资源**多候选**（精确或归一后同名/id 相撞）→ 不猜（`ADD_RESOURCE_AMBIGUOUS`，P1-2）；
  *   · **包 id 无法确定** → 不降级生成无效 `ui://`（`PKGID_MISSING`）。
  * 本工具**永不自动修改** package.xml（PRD R4-F6）。
  *
@@ -814,7 +832,8 @@ function classifyAdd(a, entry) {
   const attrs = {};
   if (tag === 'image') {
     const keys = [entry.slot, diff.normName, diff.baseName].filter((k) => typeof k === 'string' && k);
-    const hit = findExportedResource(projectIndex, targetPkg, keys, a.normOpts);
+    // ADD 的是图片 → 只允许匹配 type==='image' 的资源（P1-2 问题 A）
+    const hit = findExportedResource(projectIndex, targetPkg, keys, a.normOpts, { type: 'image' });
     if (!hit.match) {
       // ★ blocked 也要可操作：列出目标包内已导出的图片名（纯信息，不参与匹配）★
       const available = listExportedImageNames(projectIndex, targetPkg);
@@ -827,9 +846,13 @@ function classifyAdd(a, entry) {
       const candText = hit.candidates.length ? `（${hit.candidates.join(', ')}）` : '';
       entry.status = STATUS.BLOCKED;
       if (status === RESOURCE_MATCH.AMBIGUOUS) {
-        entry.note = `图片资源 ${keysText} 在目标包 package.xml 里归一化后命中 ${hit.candidates.length} 个候选`
-          + `${candText} —— 多个资源同名，**禁止自动取第一个**`
-          + '（否则会静默绑到错误的资源）。请把 change_plan 的 slot 改成与资源名完全一致后重跑 prepare';
+        entry.note = `图片资源 ${keysText} 在目标包 package.xml 里命中 ${hit.candidates.length} 个候选`
+          + `${candText} —— 多个资源同名/id 相撞，**禁止自动取第一个**`
+          + '（否则会静默绑到错误的资源）。请把 change_plan 的 slot 改成与目标资源名完全一致后重跑 prepare';
+      } else if (status === RESOURCE_MATCH.TYPE_MISMATCH) {
+        entry.note = `图片资源 ${keysText} 在目标包 package.xml 里有同名条目，但**类型不是图片**${candText}`
+          + ' —— ADD 的是图片节点，不能引用非图片资源。'
+          + '请确认素材类型是否正确，或导入正确的图片资源后重跑 prepare';
       } else if (status === RESOURCE_MATCH.NOT_EXPORTED) {
         entry.note = `图片资源 ${keysText} 已登记在目标包 package.xml 中${candText}，但 **exported 不是 "true"**`
           + '（画师刻意未导出）—— 本工具不会引用未导出的资源。'
@@ -845,14 +868,17 @@ function classifyAdd(a, entry) {
       }
       warnings.push({
         code: status === RESOURCE_MATCH.AMBIGUOUS ? 'ADD_RESOURCE_AMBIGUOUS'
-          : status === RESOURCE_MATCH.NOT_EXPORTED ? 'ADD_RESOURCE_NOT_EXPORTED'
-            : 'ADD_RESOURCE_NOT_REGISTERED',
+          : status === RESOURCE_MATCH.TYPE_MISMATCH ? 'ADD_RESOURCE_TYPE_MISMATCH'
+            : status === RESOURCE_MATCH.NOT_EXPORTED ? 'ADD_RESOURCE_NOT_EXPORTED'
+              : 'ADD_RESOURCE_NOT_REGISTERED',
         op: 'ADD', slot: entry.slot, node: entry.node,
         msg: status === RESOURCE_MATCH.AMBIGUOUS
           ? `ADD 条目 slot='${entry.slot}' 命中多个同名资源${candText}—— 不猜，已 blocked`
-          : status === RESOURCE_MATCH.NOT_EXPORTED
-            ? `ADD 条目 slot='${entry.slot}' 的资源未 exported（package.xml 里 exported≠"true"），已 blocked`
-            : `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
+          : status === RESOURCE_MATCH.TYPE_MISMATCH
+            ? `ADD 条目 slot='${entry.slot}' 的同名资源不是图片类型${candText}，已 blocked`
+            : status === RESOURCE_MATCH.NOT_EXPORTED
+              ? `ADD 条目 slot='${entry.slot}' 的资源未 exported（package.xml 里 exported≠"true"），已 blocked`
+              : `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
       });
       return entry;
     }
