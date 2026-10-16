@@ -514,7 +514,7 @@ test('★ CLI: 日志走 stderr、产物走 stdout（ARCHITECTURE §8.2）', (t)
 });
 
 test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即不触发兜底告警', (t) => {
-  const { resolveTargetPath } = require('../../src/cli/cmd-gen-xml');
+  const { resolveTargetPath, buildAllowedTargets } = require('../../src/cli/cmd-gen-xml');
   const rel = 'assets/MailDetail/MailDetail.xml';
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-targetpath-'));
   try {
@@ -530,14 +530,14 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
     assert.equal(abs, path.resolve(dir, rel), '主解析必须是 path.resolve(projectRoot, target.file)');
     assert.deepEqual(warned, [], '工程根命中时不得触发兜底告警');
 
-    // (b) 兜底：工程根拼不到 → 退化 rootDir，且必须告警（绝不静默换基准）
+    // (b) 兜底：工程根拼不到 → 退化 rootDir（**仍须落在工程根内**），且必须告警
     const fallbackRel = 'test/fixtures/fgui-project/assets/MailDetail/MailDetail.xml';
     if (!fs.existsSync(path.join(ROOT, fallbackRel))) return t.skip('fixture 未生成');
     const warned2 = [];
     const logger2 = {
       warn: (m) => warned2.push(String(m)), info: () => {}, error: () => {},
     };
-    const abs2 = resolveTargetPath(dir, ROOT, fallbackRel, logger2);
+    const abs2 = resolveTargetPath(FGUI_FIXTURE, ROOT, fallbackRel, logger2);
     assert.equal(abs2, path.resolve(ROOT, fallbackRel));
     assert.ok(warned2.some((w) => /rootDir/.test(w)), '兜底命中必须 stderr 告警');
 
@@ -546,6 +546,61 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
       () => resolveTargetPath(dir, ROOT, 'outside-root/MailDetail.xml', logger),
       (err) => err.code === 'USAGE' && err.exitCode === EXIT.USAGE,
     );
+
+    // ---- P0-A 路径逃逸防护 ----
+    const allowed = buildAllowedTargets({ components: [{ file: rel }] }, dir, ROOT);
+
+    // (d) `..` 逃逸 → 拒绝
+    const outsideDir = path.join(dir, '..', 'escape-out');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(path.join(outsideDir, 'victim.xml'), '<component/>\n');
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, '../escape-out/victim.xml', logger, allowed),
+      (err) => err.code === 'USAGE',
+      '`..` 逃逸必须被拒绝',
+    );
+
+    // (e) 绝对路径（指向工程根之外的真实文件）→ 拒绝
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, path.join(ROOT, 'package.json'), logger, allowed),
+      (err) => err.code === 'USAGE',
+      '绝对路径越界必须被拒绝',
+    );
+    // (e2) 带盘符形态（仅 Windows 有意义；POSIX 下路径不含盘符，跳过）
+    if (process.platform === 'win32') {
+      assert.throws(
+        () => resolveTargetPath(dir, ROOT, 'C:\\Windows\\win.ini', logger, allowed),
+        (err) => err.code === 'USAGE',
+        '带盘符绝对路径必须被拒绝',
+      );
+    }
+
+    // (f) 工程根之内但**未在 index 登记**的文件 → 拒绝（不能「文件存在就允许写」）
+    fs.mkdirSync(path.join(dir, 'assets/Other'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'assets/Other/Other.xml'), '<component/>\n');
+    assert.equal(resolveTargetPath(dir, ROOT, rel, logger, allowed), path.resolve(dir, rel), '已登记文件应放行');
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, 'assets/Other/Other.xml', logger, allowed),
+      (err) => err.code === 'USAGE',
+      '未登记组件必须被拒绝',
+    );
+
+    // (g) 软链逃逸：工程根内的软链指向外部 → realpath 校验应拒绝
+    let symlinkReady = false;
+    try {
+      const linkPath = path.join(dir, 'link-out');
+      fs.symlinkSync(outsideDir, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+      symlinkReady = true;
+    } catch {
+      symlinkReady = false; // Windows 需开发者模式/管理员权限 —— 条件跳过（下方注明）
+    }
+    if (symlinkReady) {
+      assert.throws(
+        () => resolveTargetPath(dir, ROOT, 'link-out/victim.xml', logger, allowed),
+        (err) => err.code === 'USAGE',
+        '软链逃逸必须被 realpath 校验拒绝',
+      );
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

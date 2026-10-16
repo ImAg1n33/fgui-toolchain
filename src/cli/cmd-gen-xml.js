@@ -99,8 +99,60 @@ function requireProjectRoot(ctx) {
   return locateProject(projectInput).root;
 }
 
+/** 解析符号链接后的真实路径（失败则原样返回）。 */
+function realpathSafe(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/** 大小写归一（Windows 大小写不敏感；两侧一致处理，不影响 POSIX 正确性）。 */
+function normCase(p) {
+  return process.platform === 'win32' ? String(p).toLowerCase() : String(p);
+}
+
 /**
- * 把 project_index 里的相对 `file` 解析成绝对路径。
+ * child 是否位于 root 之内 —— **路径段比较**，绝不用字符串前缀
+ * （前缀法会放过 `/proj-evil` 这类同前缀的越界路径）。
+ * @param {string} root
+ * @param {string} child
+ * @returns {boolean}
+ */
+function isInside(root, child) {
+  const rel = path.relative(root, child);
+  if (rel === '') return true;
+  if (rel === '..' || rel.startsWith(`..${path.sep}`)) return false;
+  if (path.isAbsolute(rel)) return false;
+  return true;
+}
+
+/**
+ * `project_index.components[].file` 里**登记过**的组件绝对路径集合（P0-A 校验 ③）。
+ * @param {Object} projectIndex
+ * @param {string} projectRoot
+ * @param {string} rootDir
+ * @returns {Set<string>} normCase(realpath) 集合
+ */
+function buildAllowedTargets(projectIndex, projectRoot, rootDir) {
+  const set = new Set();
+  const comps = (projectIndex && Array.isArray(projectIndex.components)) ? projectIndex.components : [];
+  for (const c of comps) {
+    if (!c || typeof c.file !== 'string' || !c.file || c.file.startsWith('outside-root/')) continue;
+    for (const base of [projectRoot, rootDir]) {
+      const a = path.resolve(base, c.file);
+      if (fs.existsSync(a)) {
+        set.add(normCase(realpathSafe(a)));
+        break;
+      }
+    }
+  }
+  return set;
+}
+
+/**
+ * 把 project_index 里的相对 `file` 解析成绝对路径，并做**路径边界校验**（P0-A）。
  *
  * ★ 契约（A3-0b 已与第 3 步工程师对齐）★
  *   `genPlan.target.file` 是 **FGUI 工程根相对** 路径（如 `assets/MailDetail/MailDetail.xml`），
@@ -108,33 +160,75 @@ function requireProjectRoot(ctx) {
  *   **不触发兜底告警**。
  *
  * ★ 兜底只作最后手段 ★
- *   若索引是在别处生成的（file 相对的是生成索引时的 rootDir），工程根拼不出，
- *   才退化按本次 CLI 的 `--root` 拼，且**命中时必须 stderr 告警**（绝不静默换基准）。
- *   两者都不存在 → USAGE(2)。`outside-root/` 形态直接拒绝，不猜。
+ *   若索引是在别处生成的（file 相对的是生成索引时的 rootDir），工程根拼不出，才退化按本次
+ *   CLI 的 `--root` 拼，且**命中时必须 stderr 告警**（绝不静默换基准）。兜底结果同样要过下面
+ *   的全部边界校验（只有落在工程根内才可能通过）。
+ *
+ * ★ P0-A 路径逃逸防护（四条，缺一不可）★
+ *   `gen_plan.json` 的定位就是「人可编辑」，所以只靠 SHA-256 防漂移挡不住「人自己改
+ *   target.file 并同步改哈希」。校验：
+ *     ① 解析结果必须**位于工程根之内**（路径段比较）；
+ *     ② `fs.realpathSync` 解析符号链接后的真实路径仍须在工程根内（防软链跳出）；
+ *     ③ 目标文件必须是 `project_index.components[].file` 里**登记过**的组件 XML；
+ *     ④ `outside-root/` 跨盘降级形态继续拒绝。
  *
  * @param {string} projectRoot
  * @param {string} rootDir
  * @param {string} relFile
  * @param {Object} logger
+ * @param {Set<string>} [allowedTargets] 登记组件的 normCase(realpath) 集合
  * @returns {string} 绝对路径
  */
-function resolveTargetPath(projectRoot, rootDir, relFile, logger) {
+function resolveTargetPath(projectRoot, rootDir, relFile, logger, allowedTargets) {
   if (!relFile || typeof relFile !== 'string') {
     throw new AppError(CODES.USAGE, '目标组件缺少 file 字段：project_index.components 未提供 file');
   }
+  // ④ 跨盘降级形态：不含绝对路径信息，无法定位 → 拒绝
   if (relFile.startsWith('outside-root/')) {
     throw new AppError(CODES.USAGE,
       `目标组件 file 是跨盘降级形态（outside-root/…），无法定位绝对路径，拒绝猜测：${relFile}`);
   }
-  const absProject = path.resolve(projectRoot, relFile);
-  if (fs.existsSync(absProject)) return absProject;
-  const absRoot = path.resolve(rootDir, relFile);
-  if (fs.existsSync(absRoot)) {
-    if (logger) logger.warn('目标文件不在 --project 工程根下，已按 CLI rootDir 解析', { file: relFile, rootDir });
-    return absRoot;
+
+  // 主解析 → 兜底
+  let abs = null;
+  const candProject = path.resolve(projectRoot, relFile);
+  if (fs.existsSync(candProject)) {
+    abs = candProject;
+  } else {
+    const candRoot = path.resolve(rootDir, relFile);
+    if (fs.existsSync(candRoot)) {
+      if (logger) logger.warn('目标文件不在 --project 工程根下，已按 CLI rootDir 解析（仍会做包含性校验）', { file: relFile, rootDir });
+      abs = candRoot;
+    }
   }
-  throw new AppError(CODES.USAGE,
-    `目标组件文件未找到：尝试了 <project>/${relFile} 与 <root>/${relFile} 均不存在`);
+  if (!abs) {
+    throw new AppError(CODES.USAGE,
+      `目标组件文件未找到：尝试了 <project>/${relFile} 与 <root>/${relFile} 均不存在`);
+  }
+
+  // ① 包含性校验（路径段比较）
+  if (!isInside(projectRoot, abs)) {
+    throw new AppError(CODES.USAGE,
+      `目标文件逃出工程根，拒绝写入：${abs}（工程根 ${projectRoot}；target.file=${JSON.stringify(relFile)}）`
+      + ' —— gen_plan.json 的 target.file 只能是工程根内的相对路径（P0-A 路径边界）',
+      { targetFile: relFile, resolved: abs, projectRoot });
+  }
+  // ② 符号链接真实路径仍需在工程根内
+  const realRoot = realpathSafe(projectRoot);
+  const realAbs = realpathSafe(abs);
+  if (!isInside(realRoot, realAbs)) {
+    throw new AppError(CODES.USAGE,
+      `目标文件经符号链接解析后逃出工程根，拒绝写入：${realAbs}（工程根 ${realRoot}）`,
+      { targetFile: relFile, resolved: abs, realpath: realAbs, projectRoot: realRoot });
+  }
+  // ③ 必须是登记过的组件 XML（不能「文件存在就允许写」）
+  if (allowedTargets && allowedTargets.size && !allowedTargets.has(normCase(realAbs))) {
+    throw new AppError(CODES.USAGE,
+      `目标文件不在 project_index.components[].file 登记范围内，拒绝写入：${abs}`
+      + ' —— 只有工程里已登记的组件 XML 才允许被 gen-xml 改写（P0-A）',
+      { targetFile: relFile, resolved: abs });
+  }
+  return abs;
 }
 
 /** 读目标 XML 内容（缺失 → USAGE）。 */
@@ -178,7 +272,8 @@ function runPrepare(ctx, outDir) {
   /** @type {Object<string,string>} */
   const targetContents = {};
   if (target && target.file && !String(target.file).startsWith('outside-root/')) {
-    const abs = resolveTargetPath(projectRoot, rootDir, target.file, logger);
+    const abs = resolveTargetPath(projectRoot, rootDir, target.file, logger,
+      buildAllowedTargets(projectIndex, projectRoot, rootDir));
     targetContents[target.file] = readTargetContent(abs);
   }
 
@@ -238,7 +333,8 @@ function loadGenInputs(ctx) {
   const targetContents = {};
   const file = genPlan.target && genPlan.target.file;
   if (file) {
-    const abs = resolveTargetPath(projectRoot, rootDir, file, logger);
+    const abs = resolveTargetPath(projectRoot, rootDir, file, logger,
+      buildAllowedTargets(projectIndex, projectRoot, rootDir));
     targetContents[file] = readTargetContent(abs);
   }
   return {
@@ -396,7 +492,8 @@ function runApplyPhase(ctx, outDir) {
         results.push({ applied: false, file: f.file, error: 'dryrun 校验字节与待写内容不一致（内部不一致，拒绝写盘）', code: 'INTERNAL' });
         continue;
       }
-      const abs = resolveTargetPath(projectRoot, ctx.rootDir, f.file, logger);
+      const abs = resolveTargetPath(projectRoot, ctx.rootDir, f.file, logger,
+        buildAllowedTargets(projectIndex, projectRoot, ctx.rootDir));
       try {
         const r = writeComponentXml({
           targetPath: abs, content, now, config, resources, backup: true,
@@ -525,4 +622,4 @@ function run(ctx) {
   }
 }
 
-module.exports = { run, resolveTargetPath };
+module.exports = { run, resolveTargetPath, buildAllowedTargets };
