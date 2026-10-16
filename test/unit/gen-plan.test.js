@@ -433,7 +433,10 @@ test('③ ADD: smartobject → blocked（有 note，不静默）', () => {
   assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_SMARTOBJECT'));
 });
 
-test('③ ADD: pkgId 缺失 → 按包名降级 src 且显式 warning（不静默）', () => {
+test('② ADD: pkgId 缺失 → **blocked**（不降级生成无效 ui://），PKGID_MISSING 保留', () => {
+  // ★ 行为变更（外部审查 P1，team-lead 采纳）：原实现按包名降级生成
+  //   `ui://<pkgName>/<id>` —— 那等于生成一个大概率无效的引用（与 BUG-A 同性质：
+  //   静默生成无效内容）。现改为 blocked，条目不可执行。
   const idx = projectIndexFixture({
     project: { name: 'MailPopup', packages: [{ name: 'Mail', id: null, relPath: 'assets/Mail' }] },
     resources: [{ pkg: 'Mail', pkgId: null, type: 'image', id: 'r0001', name: 'reward_icon', exported: true }],
@@ -443,10 +446,13 @@ test('③ ADD: pkgId 缺失 → 按包名降级 src 且显式 warning（不静�
     targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
   });
   const e = genPlan.entries[0];
-  assert.equal(e.status, STATUS.RESOLVED);
-  assert.equal(e.patch.attrs.src, 'ui://Mail/r0001', '降级为包名');
-  assert.ok(genPlan.warnings.some((w) => w.code === 'PKGID_MISSING'),
-    '★ pkgId 缺失必须显式告警（§9）');
+  assert.equal(e.status, STATUS.BLOCKED, '★ 缺包 id 时必须 blocked（不得降级生成 src）');
+  assert.equal(e.patch, null, '★ 不得产出 patch（否则会写出无效 ui:// 引用）');
+  assert.ok(e.note.includes('包 id'), 'note 应点明「包 id 无法确定」');
+  assert.ok(e.note.includes('不降级') || e.note.includes('无法构造合法'), 'note 应说明为何不降级');
+  const w = genPlan.warnings.find((x) => x.code === 'PKGID_MISSING');
+  assert.ok(w, '★ PKGID_MISSING 告警保留（说明被阻塞的原因）');
+  assert.ok(/blocked/.test(w.msg), 'warning 应说明已 blocked');
 });
 
 // ════════════════════════════════════════════════════════════════════════════

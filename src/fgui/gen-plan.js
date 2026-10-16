@@ -858,17 +858,24 @@ function classifyAdd(a, entry) {
     }
     const res = hit.match;
     const pkgId = a.pkgId;
-    if (pkgId) {
-      attrs.src = `ui://${pkgId}/${res.id}`;
-    } else {
-      // §9：pkgId 落盘位置未确认时常为 null —— 按包名降级并**显式记录**（不静默）
-      attrs.src = `ui://${targetPkg}/${res.id}`;
+    // ★ 包 id 无法确定时**不许降级生成**（外部审查 P1，team-lead 已采纳）★
+    //   原来按包名降级生成 `ui://<pkgName>/<id>` —— 那等于**生成一个大概率无效的
+    //   引用**（与 BUG-A 同性质：静默生成无效内容）。且 ui:// 的真实写法
+    //   （斜杠风格 vs Bridge 拼接风格）尚未与真实工程对账，生成什么都只能算猜。
+    //   故改为 blocked：不构造 src，条目不可执行，PKGID_MISSING 保留说明原因。
+    if (!pkgId) {
+      entry.status = STATUS.BLOCKED;
+      entry.note = `目标包 '${targetPkg}' 的包 id 无法确定（package.xml 里取不到 pkgId）`
+        + ' —— 缺包 id 无法构造合法的 ui:// 引用，**不降级猜测生成**。'
+        + '请确认 package.xml 中包 id 的落盘位置（Q3 缺口，需真实工程副本对账）后重跑 prepare';
       warnings.push({
         code: 'PKGID_MISSING', op: 'ADD', slot: entry.slot, node: entry.node,
-        msg: `目标包 '${targetPkg}' 的 pkgId 未解析到（落盘位置未确认，Q3 缺口）——`
-          + ` src 已按包名降级为 ${attrs.src}，请在拿到真实工程副本后核对`,
+        msg: `ADD 条目 slot='${entry.slot}' 因目标包 '${targetPkg}' 缺 pkgId 被 blocked`
+          + '（不降级生成 ui:// 引用，避免生成无效引用）',
       });
+      return entry;
     }
+    attrs.src = `ui://${pkgId}/${res.id}`;
   }
 
   // ---- 属性：id / name / xy / size / text / color / alpha ----
