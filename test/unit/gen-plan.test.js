@@ -20,7 +20,7 @@ const path = require('path');
 
 const {
   buildGenPlan, isUnconfirmed, evaluateGate, createIdAllocator, sha256Hex,
-  findExportedResource, STATUS,
+  findExportedResource, listExportedImageNames, isExported, STATUS,
 } = require('../../src/fgui/gen-plan');
 const { planNeedsHuman } = require('../../src/diff/planner');
 const { EXIT, AppError } = require('../../src/core/errors');
@@ -384,7 +384,7 @@ test('③-b-4 副本资源不被归一化吞掉（stripCopySuffix=false）', () 
   assert.equal(hit.match.id, 'r0001', '★ 必须绑正本，绝不能被副本(1)干扰');
 });
 
-test('③ ADD: exported=false 的资源视为未登记 → blocked', () => {
+test('③ ADD: exported=false 的资源 → blocked，且用 NOT_EXPORTED 专属 code（不是「未登记」）', () => {
   const { genPlan } = run([
     { op: 'ADD', slot: '未导出图', node: 'L017' },
   ], {
@@ -392,6 +392,11 @@ test('③ ADD: exported=false 的资源视为未登记 → blocked', () => {
   });
   assert.equal(genPlan.entries[0].status, STATUS.BLOCKED);
   assert.ok(genPlan.entries[0].note.includes('exported'));
+  // ★ 与「未登记」区分：行动不同（标成导出 vs 导入素材）
+  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_EXPORTED'),
+    '未导出的资源应报 ADD_RESOURCE_NOT_EXPORTED');
+  assert.ok(!genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_REGISTERED'),
+    '不应误报为「未登记」（资源其实登记了）');
 });
 
 test('③ ADD: 无 target-ir → blocked（且不发生 id 分配）', () => {
@@ -442,6 +447,82 @@ test('③ ADD: pkgId 缺失 → 按包名降级 src 且显式 warning（不静�
   assert.equal(e.patch.attrs.src, 'ui://Mail/r0001', '降级为包名');
   assert.ok(genPlan.warnings.some((w) => w.code === 'PKGID_MISSING'),
     '★ pkgId 缺失必须显式告警（§9）');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ① BUG-A：exported 判定（字符串 "false" 不许当真值）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ BUG-A: exported="false" 的资源不得被绑定 → not_exported + blocked', () => {
+  // 根因：package-indexer 产出的 exported **永远是字符串**（"true"/"false"/null），
+  //   原实现用真值判断 → Boolean("false") === true → 未导出的资源被静默绑定。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: 'false' },
+    ],
+  });
+  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
+  assert.equal(hit.status, 'not_exported', '★ 字符串 "false" 必须判为未导出');
+  assert.equal(hit.match, null, '★ 绝不绑定未导出的资源（否则贴图丢失且无报错）');
+  assert.deepEqual(hit.candidates, ['reward_icon.png'], '应报出「对得上但未导出」的候选');
+
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.BLOCKED);
+  assert.equal(e.patch, null);
+  assert.ok(/exported/.test(e.note), '★ note 必须含 exported 字样（区分于「未登记」）');
+  assert.ok(e.note.includes('标成导出'), 'note 应给出行动：去 package.xml 标成导出');
+  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_EXPORTED'),
+    '★ 必须用独立的 ADD_RESOURCE_NOT_EXPORTED（与「未登记」的 code 分开）');
+});
+
+test('★ BUG-A: exported="true" 仍正常解析；exported=null 视同未导出', () => {
+  const ok = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: 'true' },
+    ],
+  });
+  assert.equal(findExportedResource(ok, 'Mail', ['reward_icon']).status, 'normalized',
+    '字符串 "true" 必须视为已导出');
+  const p = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: ok,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  assert.equal(p.genPlan.entries[0].status, STATUS.RESOLVED);
+  assert.equal(p.genPlan.entries[0].patch.attrs.src, 'ui://e5f6a7b8/r0001');
+
+  const nul = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: null },
+    ],
+  });
+  assert.equal(findExportedResource(nul, 'Mail', ['reward_icon']).status, 'not_exported',
+    'exported=null 视同未导出');
+});
+
+test('★ BUG-A 反向验证: 真值判断会放行 "false"（证明 isExported 是必需的）', () => {
+  // 这条测试是「测试能真失败」的证明：
+  //   若把 isExported 改回真值判断（`r.exported`），上面两条会立刻变红。
+  //   这里额外把陷阱本身钉死 —— 后人读到这里就知道为什么不能用真值。
+  assert.equal(Boolean('false'), true, '★ 陷阱：Boolean("false") === true（真值判断会放行未导出资源）');
+  assert.equal(isExported('false'), false, 'isExported 必须拒绝字符串 "false"');
+  assert.equal(isExported('true'), true);
+  assert.equal(isExported(true), true, '布尔 true 也接受（防御手工构造的 index）');
+  assert.equal(isExported(null), false);
+  assert.equal(isExported(undefined), false);
+  assert.equal(isExported(''), false);
+  assert.equal(isExported(1), false, '数字 1 不是合法表示（index 只产出字符串/布尔）');
+  // 端到端口径：字符串 "false" 的资源绝不可出现在「已导出」列表里
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'hidden.png', exported: 'false' },
+    ],
+  });
+  assert.deepEqual(listExportedImageNames(idx, 'Mail'), [],
+    '★ 未导出的资源不得出现在「已导出图片」列表（否则 note 会误导人）');
 });
 
 // ════════════════════════════════════════════════════════════════════════════
