@@ -136,9 +136,17 @@ test('dryrun: lint 门禁 —— 8 位色 patch → exitCode 3，报出 R-03，�
 
   assert.equal(exitCode, 3, 'lint error 应返回 LINT_BLOCKED(3)');
   assert.equal(report.ok, false);
+  assert.equal(report.summary.status, 'failed', 'lint error → failed');
   const errs = report.files[0].lint.errors;
   assert.ok(errs.some((e) => e.rule === 'R-03'), '应报出 R-03 颜色规则错误');
   assert.equal(report.summary.lintErrors >= 1, true);
+
+  // ★ BUG-C：per-file 的 lint error 必须同时出现在顶层 errors（含 file + rule/message）★
+  assert.ok(report.errors.length >= 1, '顶层 errors 不应为空（BUG-C）');
+  assert.ok(
+    report.errors.some((m) => /R-03/.test(m) && new RegExp(FILE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(m)),
+    `顶层 errors 应含 file + rule（实测：${JSON.stringify(report.errors)}）`,
+  );
 
   // ★ 内存打补丁不得污染调用方 ★
   assert.equal(targetContents[FILE], original, '调用方 targetContents 字符串被篡改');

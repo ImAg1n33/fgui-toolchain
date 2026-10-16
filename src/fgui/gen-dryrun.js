@@ -508,6 +508,12 @@ function runDryrun(input = {}) {
     const errs = (lint.errors || []).map((e) => ({ rule: e.rule, message: e.message, line: e.line }));
     if (errs.length) lintBlocked = true;
     lintErrorCount += errs.length;
+    // ★ BUG-C 修复 ★：per-file 的 lint error 必须进顶层 `errors`（含 file + rule/message），
+    //   否则「聚合 errors 为空而 per-file 有 error」会让只看顶层字段的消费方误判。
+    //   注意：这里**不**置 hadFatal —— lint error 的退出码是 LINT_BLOCKED(3)，不是 USAGE(2)。
+    for (const e of errs) {
+      topErrors.push(`lint error: ${t.file} [${e.rule}] ${e.message}（第 ${e.line} 行）`);
+    }
 
     const lintWarns = (lint.warnings || []).map((w) => ({ rule: w.rule, message: w.message, line: w.line }));
 
