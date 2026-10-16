@@ -606,6 +606,48 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
   }
 });
 
+test('CLI: gen-xml 三态退出码 —— 有 blocked 的 plan → 4；加 --allow-partial → 0 且 ok=false', () => {
+  if (!fs.existsSync(path.join(FGUI_FIXTURE, 'MailPopup.fairy'))) {
+    makeFguiProject({ outDir: FGUI_FIXTURE });
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-partial-'));
+  try {
+    const idx = runCliJson([
+      'project-index', '--root', ROOT, '--project', FGUI_FIXTURE,
+      '--out', dir, '--no-images',
+    ]);
+    assert.equal(idx.code, EXIT.OK);
+
+    // REUSE（resolved）+ 一条 slot 零命中（unresolved）→ 非全部 resolved → partial
+    const planPath = path.join(dir, 'change_plan.json');
+    writeJson(planPath, {
+      version: '1.0',
+      task: { name: 'MailDetail', basePkg: 'MailDetail', targetPkg: 'MailDetail' },
+      diffs: [
+        { op: 'REUSE', slot: 'frame', node: 'L010' },
+        { op: 'MOVE', slot: 'no_such_layer_xyz', node: 'L999' },
+      ],
+    });
+    const base = ['gen-xml', 'prepare', '--root', ROOT, '--plan', planPath,
+      '--project', FGUI_FIXTURE, '--index', path.join(dir, 'project_index.json'), '--out', dir];
+
+    const strict = runCliJson(base);
+    assert.equal(strict.code, EXIT.NEEDS_HUMAN, 'partial 默认应拦成 4（不是成功）');
+    assert.equal(strict.json.ok, false);
+    assert.equal(strict.json.summary.status, 'partial');
+    assert.ok(strict.json.summary.byStatus.unresolved >= 1, '零命中的 MOVE 应记为 unresolved');
+    assert.equal(typeof strict.json.summary.blockedCount, 'number', 'prepare summary 应带 blockedCount');
+    assert.ok(/partial/.test(strict.stderr), 'stderr 应有 partial 告警');
+
+    const allowed = runCliJson([...base, '--allow-partial']);
+    assert.equal(allowed.code, EXIT.OK, '--allow-partial 时放行退出码');
+    assert.equal(allowed.json.ok, false, '--allow-partial 不改变 ok（仍 partial）');
+    assert.equal(allowed.json.status, 'partial');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('CLI: gen-xml prepare 产出的 target.file 严格等于「工程根相对」路径', () => {
   // 关键场景：索引在 **--root=仓库根** 下生成（file 相对 rootDir），
   // 而 --project 指向子目录里的 FGUI 工程 —— 此时 target.file 必须被相对化成工程根相对。

@@ -157,8 +157,11 @@ test('dryrun: 打补丁生效 —— MOVE + ADD 结果出现在 diff，且 resol
     targetContents: { [FILE]: original },
   });
 
-  assert.equal(exitCode, 0, `预期 lint clean（实际 errors=${JSON.stringify(report.files[0].lint.errors)}）`);
-  assert.equal(report.ok, true);
+  // ★ 三态契约（M2-SPEC §4.1①）：有 unresolved/blocked（=非 resolved）→ partial → 退出码 4 ★
+  assert.equal(exitCode, 4, `含非 resolved 条目应为 partial(4)（lint errors=${JSON.stringify(report.files[0].lint.errors)}）`);
+  assert.equal(report.ok, false, 'partial 时 ok 必须为 false（与退出码解耦的第二信号）');
+  assert.equal(report.summary.status, 'partial');
+  assert.equal(report.summary.blockedCount, 1, 'blocked 条目应计入 blockedCount');
   assert.equal(report.summary.entriesApplied, 2, '两条 resolved 条目应被应用');
   assert.equal(report.summary.entriesSkipped, 2, 'unresolved + blocked 应被跳过');
 
@@ -179,6 +182,17 @@ test('dryrun: 打补丁生效 —— MOVE + ADD 结果出现在 diff，且 resol
     report.files[0].notes.some((n) => /M2-SPEC §9/.test(n) && /after=b00003/.test(n)),
     'ADD 忽略 after 锚点必须显式记入 notes',
   );
+
+  // --allow-partial：显式允许部分构建 → 退出码回到 0，但 ok 仍为 false、status 仍 partial
+  const allowed = runDryrun({
+    genPlan: plan,
+    projectIndex: null,
+    targetContents: { [FILE]: original },
+    options: { allowPartial: true },
+  });
+  assert.equal(allowed.exitCode, 0, '--allow-partial 时 partial 不拦退出码');
+  assert.equal(allowed.report.ok, false, '--allow-partial 不改变 ok（仍 partial）');
+  assert.equal(allowed.report.summary.status, 'partial');
 });
 
 // ────────────────────────────────────────────────────────────────────────────

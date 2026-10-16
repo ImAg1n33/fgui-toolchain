@@ -288,13 +288,29 @@ function runPrepare(ctx, outDir) {
     options: { skipUnconfirmed, projectRoot, rootDir },
   });
 
+  // ---- 三态状态（M2-SPEC §4.1①）：不完整即 partial，不默认为成功 ----
+  const entries0 = Array.isArray(genPlan.entries) ? genPlan.entries : [];
+  const blockedCount0 = entries0.filter((e) => e && e.status === 'blocked').length;
+  const pending0 = entries0.filter((e) => e && e.status !== 'resolved');
+  const status0 = (genPlan.gate && genPlan.gate.needsHuman) || pending0.length > 0 ? 'partial' : 'complete';
+  genPlan.summary = { ...genPlan.summary, status: status0, blockedCount: blockedCount0 };
+  if (status0 === 'partial') {
+    emitPartialNotice(logger, 'prepare', blockedCount0, pending0, genPlan.gate);
+  }
+
   const outPath = path.join(outDir, 'gen_plan.json');
   writeJson(outPath, genPlan); // 不做 root 相对化：file 已是相对路径，避免二次相对化
+
+  const allowPartial0 = flagBool(flags['allow-partial'], false);
+  let code0 = exitCode;
+  if (code0 === EXIT.OK && status0 === 'partial' && !allowPartial0) code0 = EXIT.NEEDS_HUMAN;
 
   process.stdout.write(`${JSON.stringify({
     command: 'gen-xml',
     phase: 'prepare',
-    ok: exitCode === EXIT.OK,
+    // ok 语义与退出码解耦：partial（即便 --allow-partial 放行）仍为 false
+    ok: status0 === 'complete',
+    status: status0,
     outputs: { genPlan: relShow(outDir, outPath) },
     target: { file: genPlan.target.file, component: genPlan.target.component, pkg: genPlan.target.pkg },
     gate: genPlan.gate,
@@ -302,7 +318,30 @@ function runPrepare(ctx, outDir) {
     warningCount: (genPlan.warnings || []).length,
     warnings: genPlan.warnings || [],
   }, null, 2)}\n`);
-  return exitCode;
+  return code0;
+}
+
+/**
+ * 部分构建的 stderr 告警（明确列出被阻塞/待处理的 op/slot 与原因，引导人去看 gen_plan.json）。
+ * @param {Object} logger
+ * @param {string} phase
+ * @param {number} blockedCount
+ * @param {Object[]} pending 非 resolved 条目
+ * @param {Object} [gate]
+ */
+function emitPartialNotice(logger, phase, blockedCount, pending, gate) {
+  const lines = [
+    `[gen-xml ${phase}] 构建不完整（status=partial，blocked=${blockedCount}，待处理=${pending.length}）`
+      + '—— 这些条目未落盘，请查看 gen_plan.json 的对应条目 note',
+  ];
+  for (const e of pending) {
+    lines.push(`  · ${e.op || '?'} slot=${e.slot === undefined ? '?' : e.slot} status=${e.status || '?'}`
+      + `${e.nodeId ? ` nodeId=${e.nodeId}` : ''}${e.note ? ` —— ${e.note}` : ''}`);
+  }
+  if (gate && gate.needsHuman) lines.push('  （门禁：含未确认 INFERRED / 歧义条目，需人工确认）');
+  lines.push('  若「部分构建」可接受，请显式加 --allow-partial 放行退出码（ok 仍为 false）。');
+  process.stderr.write(`${lines.join('\n')}\n`);
+  if (logger) logger.warn(`gen-xml ${phase} 构建不完整（partial）`, { blockedCount, pending: pending.length });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -348,7 +387,7 @@ function loadGenInputs(ctx) {
  * @returns {string}
  */
 function renderDryrunMarkdown(report) {
-  const lines = ['# gen-xml dryrun 报告', '', `- ok: ${report.ok}`, ''];
+  const lines = ['# gen-xml dryrun 报告', '', `- ok: ${report.ok}`, `- status: ${report.status || (report.summary && report.summary.status)}`, ''];
   lines.push(`- 变更文件数: ${report.summary.filesChanged}`);
   lines.push(`- 应用条目数: ${report.summary.entriesApplied}`);
   lines.push(`- 跳过条目数: ${report.summary.entriesSkipped}`);
@@ -399,14 +438,20 @@ function renderDryrunMarkdown(report) {
  * @returns {number} 退出码
  */
 function runDryrunPhase(ctx, outDir) {
-  const { config } = ctx;
+  const { flags, logger, config } = ctx;
   const {
     genPlan, projectIndex, targetContents,
   } = loadGenInputs(ctx);
 
+  const allowPartial = flagBool(flags['allow-partial'], false);
   const { report, exitCode } = runDryrun({
-    genPlan, projectIndex, targetContents, options: { config },
+    genPlan, projectIndex, targetContents, options: { config, allowPartial },
   });
+
+  if (report.summary.status === 'partial') {
+    emitPartialNotice(logger, 'dryrun', report.summary.blockedCount,
+      (genPlan.entries || []).filter((e) => e && e.status !== 'resolved'), null);
+  }
 
   const jsonPath = path.join(outDir, 'dryrun_report.json');
   const mdPath = path.join(outDir, 'dryrun_report.md');
@@ -417,7 +462,8 @@ function runDryrunPhase(ctx, outDir) {
   process.stdout.write(`${JSON.stringify({
     command: 'gen-xml',
     phase: 'dryrun',
-    ok: exitCode === EXIT.OK,
+    ok: report.ok,
+    status: report.summary.status,
     exitCodeMeaning: exitMeaning(exitCode),
     outputs: { report: relShow(outDir, jsonPath), markdown: relShow(outDir, mdPath) },
     summary: report.summary,
@@ -428,9 +474,22 @@ function runDryrunPhase(ctx, outDir) {
   return exitCode;
 }
 
+/**
+ * apply 的三态状态：failed 优先于 partial。
+ * @param {number} gateCode dryrun 门禁退出码
+ * @param {number} failedCount 写盘失败文件数
+ * @param {string} dryrunStatus dryrun 报告的三态
+ * @returns {'complete'|'partial'|'failed'}
+ */
+function finalStatus(gateCode, failedCount, dryrunStatus) {
+  if (failedCount > 0) return 'failed';
+  if (gateCode === EXIT.USAGE || gateCode === EXIT.LINT_BLOCKED || gateCode === EXIT.ROLLED_BACK) return 'failed';
+  if (dryrunStatus === 'partial' || gateCode === EXIT.NEEDS_HUMAN) return 'partial';
+  return 'complete';
+}
+
 /** 退出码语义（供 stdout 字段）。 */
-function exitMeaning(code) {
-  switch (code) {
+function exitMeaning(code) {  switch (code) {
     case EXIT.OK: return 'OK';
     case EXIT.USAGE: return 'USAGE（参数错/漂移/目标找不到）';
     case EXIT.LINT_BLOCKED: return 'LINT_BLOCKED';
@@ -465,13 +524,20 @@ function runApplyPhase(ctx, outDir) {
     genPlan, projectIndex, targetContents, projectRoot,
   } = loadGenInputs(ctx);
 
+  const allowPartial = flagBool(flags['allow-partial'], false);
+
   // 先跑同一套漂移校验 + 内存打补丁 + lint 门禁（不改盘）。
   // ★ 关键不变量（方案 A）★：apply 直接写 runDryrun 返回的 `contents[file]` ——
   //   即 dryrun 校验过的**同一份字节**。绝不自行重放补丁，从而杜绝
   //   「dryrun 报告 sha256After ≠ 实际落盘内容」这类可静默漂移的重复实现。
   const { report, exitCode: gateCode, contents: patched } = runDryrun({
-    genPlan, projectIndex, targetContents, options: { config },
+    genPlan, projectIndex, targetContents, options: { config, allowPartial },
   });
+
+  if (report.summary.status === 'partial') {
+    emitPartialNotice(logger, 'apply', report.summary.blockedCount,
+      (genPlan.entries || []).filter((e) => e && e.status !== 'resolved'), null);
+  }
 
   const resources = buildLintResources(projectIndex);
   /** @type {Object[]} */
@@ -527,14 +593,25 @@ function runApplyPhase(ctx, outDir) {
     applied: results.filter((r) => r.applied).length,
     failed: results.filter((r) => !r.applied).length,
   };
+  // 三态：failed（回滚/写失败）优先于 partial；partial 时 ok=false（即便 --allow-partial 放行退出码）
+  const status = finalStatus(gateCode, aggregate.failed, report.summary.status);
   const applyReport = {
-    ok: gateCode === EXIT.OK && aggregate.failed === 0,
+    ok: status === 'complete',
+    status,
     phase: 'apply',
     target: { file: genPlan.target ? genPlan.target.file : null },
-    summary: aggregate,
-    gate: { exitCode: gateCode, filesChanged: report.summary.filesChanged, entriesApplied: report.summary.entriesApplied, entriesSkipped: report.summary.entriesSkipped },
+    summary: { ...aggregate, status, blockedCount: report.summary.blockedCount || 0 },
+    gate: {
+      exitCode: gateCode,
+      status: report.summary.status,
+      filesChanged: report.summary.filesChanged,
+      entriesApplied: report.summary.entriesApplied,
+      entriesSkipped: report.summary.entriesSkipped,
+      blockedCount: report.summary.blockedCount || 0,
+    },
     files: results,
     errors: report.errors || [],
+    warnings: report.warnings || [],
   };
 
   const jsonPath = path.join(outDir, 'apply_report.json');
@@ -550,11 +627,13 @@ function runApplyPhase(ctx, outDir) {
     command: 'gen-xml',
     phase: 'apply',
     ok: applyReport.ok,
+    status,
     exitCodeMeaning: exitMeaning(finalCode),
     outputs: { report: relShow(outDir, jsonPath), markdown: relShow(outDir, mdPath) },
-    summary: aggregate,
+    summary: applyReport.summary,
     files: results.map((r) => ({ file: r.file, applied: r.applied, backupPath: r.backupPath || null })),
     errors: applyReport.errors,
+    warnings: applyReport.warnings,
   }, null, 2)}\n`);
   return finalCode;
 }
@@ -564,7 +643,7 @@ function runApplyPhase(ctx, outDir) {
  * @returns {string}
  */
 function renderApplyMarkdown(applyReport) {
-  const lines = ['# gen-xml apply 报告', '', `- ok: ${applyReport.ok}`, ''];
+  const lines = ['# gen-xml apply 报告', '', `- ok: ${applyReport.ok}`, `- status: ${applyReport.status}`, ''];
   lines.push(`- 已应用: ${applyReport.summary.applied}`);
   lines.push(`- 失败: ${applyReport.summary.failed}`);
   lines.push('');

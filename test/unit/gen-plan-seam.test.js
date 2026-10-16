@@ -9,7 +9,8 @@
  *   故本文件**绝不手写 gen_plan**：一律走真实 `buildGenPlan()`，再喂 `runDryrun()`。
  *
  * 覆盖：§5 的全部 6 个 op（REUSE/MOVE/RESIZE+scale9grid/RESTYLE/ADD/REMOVE）
- *       + 一条 blocked + 一条 skipped → 断言 exitCode===0 且无 error。
+ *       + 一条 blocked + 一条 skipped → 断言 status=partial、exitCode===4（--allow-partial 时 0）、
+ *       lint 无 error、且非 resolved 条目**不是** error。
  */
 
 const test = require('node:test');
@@ -127,8 +128,11 @@ test('seam: 真实 buildGenPlan → runDryrun，6 个 op + blocked + skipped 全
     targetContents: { [FILE]: content },
   });
 
-  assert.equal(exitCode, 0, `dryrun 必须 exitCode 0；errors=${JSON.stringify(report.errors)}`);
-  assert.deepEqual(report.errors, [], 'dryrun 不应有 error');
+  assert.equal(exitCode, 4, `含 blocked+skipped → partial → 退出码 4；errors=${JSON.stringify(report.errors)}`);
+  assert.equal(report.summary.status, 'partial', '三态应为 partial');
+  assert.equal(report.summary.blockedCount, 1, 'blocked 条目应计入 blockedCount');
+  assert.equal(report.ok, false, 'partial 时 ok=false（不是「全部落盘」）');
+  assert.deepEqual(report.errors, [], 'dryrun 不应有 error（非 resolved 不是 error）');
   assert.equal(report.files[0].lint.errors.length, 0, `lint 不应有 error：${JSON.stringify(report.files[0].lint.errors)}`);
 
   // 账目：5 应用（MOVE/RESIZE/RESTYLE/ADD/REMOVE）+ 1 空操作（REUSE）+ 2 跳过（blocked+skipped）
@@ -151,4 +155,15 @@ test('seam: 真实 buildGenPlan → runDryrun，6 个 op + blocked + skipped 全
     report.files[0].diff.includes('+    <image id="b00004"'),
     'ADD 的新节点应出现在 diff',
   );
+
+  // --allow-partial：显式允许部分构建 → 退出码 0，但 ok 仍 false、status 仍 partial
+  const allowed = runDryrun({
+    genPlan: built.genPlan,
+    projectIndex,
+    targetContents: { [FILE]: content },
+    options: { allowPartial: true },
+  });
+  assert.equal(allowed.exitCode, 0, '--allow-partial 放行退出码');
+  assert.equal(allowed.report.summary.status, 'partial');
+  assert.equal(allowed.report.ok, false);
 });

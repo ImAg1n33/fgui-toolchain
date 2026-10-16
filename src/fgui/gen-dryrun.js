@@ -18,7 +18,12 @@
  *      ★ 必须注入 resources（否则 R-05/R-10 静默降级）★
  *      有 error → exitCode = LINT_BLOCKED(3)，磁盘零写入。
  *   4. 行级 unified diff（自写 LCS，零第三方依赖 —— D10）。
- *   5. 组装 report。
+ *   5. 组装 report（含三态 status / blockedCount）。
+ *   6. 三态退出码（M2-SPEC §4.1①）：complete→0；partial(有 blocked/unresolved/skipped)→4
+ *      （`options.allowPartial` 显式允许部分构建时才→0，且 report.ok 仍为 false）；
+ *      failed(patch 失败/lint error/漂移)→2 或 3。
+ *      ★ ok 与 exitCode 解耦：ok 表示「全部条目都按预期落盘」，partial 时恒为 false ——
+ *      这是给「只看退出码」的消费方的第二信号。
  *
  * ★ 接口契约（team-lead 已定死）★
  *   runDryrun({ genPlan, projectIndex, targetContents, options })
@@ -354,6 +359,9 @@ function runDryrun(input = {}) {
 
   /** @type {string[]} */
   const topErrors = [];
+  /** 「致命」错误（用法/漂移/缺内容/patch 失败）—— 决定退出码；lint error 另计（BUG-C） */
+  let hadFatal = false;
+  const pushFatal = (msg) => { topErrors.push(msg); hadFatal = true; };
   /** @type {Object[]} 顶层非致命告警（如 lint 资源注入表为空 —— D9 防静默降级） */
   const reportWarnings = [];
   /** resources 注入表是否为空（空则 R-05/R-10 会降级，需告警） */
@@ -366,14 +374,14 @@ function runDryrun(input = {}) {
   let lintErrorCount = 0;
 
   if (!targets.length) {
-    topErrors.push('gen_plan 缺少 target.file（没有可 dryrun 的目标文件）');
+    pushFatal('gen_plan 缺少 target.file（没有可 dryrun 的目标文件）');
     return {
       exitCode: EXIT.USAGE,
       report: {
         ok: false,
         files: [],
         summary: {
-          filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, entriesNoop: 0, lintErrors: 0,
+          status: 'failed', filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, entriesNoop: 0, blockedCount: 0, lintErrors: 0,
         },
         errors: topErrors,
         warnings: reportWarnings,
@@ -387,7 +395,7 @@ function runDryrun(input = {}) {
   for (const t of targets) {
     const before = contents[t.file];
     if (typeof before !== 'string') {
-      topErrors.push(`未提供目标文件内容：${t.file}（targetContents 缺少该键）`);
+      pushFatal(`未提供目标文件内容：${t.file}（targetContents 缺少该键）`);
       continue;
     }
     if (t.sha256) {
@@ -399,7 +407,7 @@ function runDryrun(input = {}) {
   }
   if (topErrors.length || drifts.length) {
     for (const d of drifts) {
-      topErrors.push(`文件在 prepare 后被修改，请重跑 prepare：${d.file}（期望 ${d.expected.slice(0, 12)}…，实测 ${d.actual.slice(0, 12)}…）`);
+      pushFatal(`文件在 prepare 后被修改，请重跑 prepare：${d.file}（期望 ${d.expected.slice(0, 12)}…，实测 ${d.actual.slice(0, 12)}…）`);
     }
     // 漂移/缺内容时：给出每文件的结构化记录（lint=null，零打补丁）
     for (const t of targets) {
@@ -424,7 +432,7 @@ function runDryrun(input = {}) {
         ok: false,
         files,
         summary: {
-          filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, entriesNoop: 0, lintErrors: 0,
+          status: 'failed', filesChanged: 0, entriesApplied: 0, entriesSkipped: 0, entriesNoop: 0, blockedCount: 0, lintErrors: 0,
         },
         errors: topErrors,
         warnings: reportWarnings,
@@ -472,7 +480,7 @@ function runDryrun(input = {}) {
       } catch (err) {
         // patch 失败 = plan 与工程不一致 → 记 error 并按 USAGE 处理（不静默）
         const msg = `条目 patch 失败（op=${entry.op || '?'} slot=${entry.slot || '?'} nodeId=${entry.nodeId || '?'}）：${err.message}`;
-        topErrors.push(msg);
+        pushFatal(msg);
         skippedEntries.push({ ...toSkipRecord({ ...entry, status: 'error' }), reason: msg });
         entriesSkipped += 1;
       }
@@ -542,18 +550,36 @@ function runDryrun(input = {}) {
     });
   }
 
-  let exitCode = EXIT.OK;
-  if (topErrors.length) exitCode = EXIT.USAGE;
+  // ---- 三态状态与退出码（M2-SPEC §4.1①）----
+  //   complete : 所有条目按预期执行（blocked/unresolved/skipped 均为 0）→ 0
+  //   partial  : 有条目被跳过/阻塞/待人工（不是错误，但不是完成）→ 4（--allow-partial 时 → 0）
+  //   failed   : 出现错误（patch 失败 / lint error / 漂移）→ 2 / 3
+  const blockedCount = (Array.isArray(genPlan.entries) ? genPlan.entries : [])
+    .filter((e) => e && e.status === 'blocked').length;
+  let status;
+  if (hadFatal || lintBlocked) status = 'failed';
+  else if (entriesSkipped > 0) status = 'partial';
+  else status = 'complete';
+
+  let exitCode;
+  if (hadFatal) exitCode = EXIT.USAGE;
   else if (lintBlocked) exitCode = EXIT.LINT_BLOCKED;
+  else if (status === 'partial') exitCode = options.allowPartial === true ? EXIT.OK : EXIT.NEEDS_HUMAN;
+  else exitCode = EXIT.OK;
 
   const report = {
-    ok: exitCode === EXIT.OK,
+    // ok = 「全部条目都按预期落盘」。partial（即便 --allow-partial 放行退出码）**仍为 false**，
+    // 这是给「只看退出码」的消费方的第二信号（与 exitCode 解耦）。
+    ok: status === 'complete',
+    status,
     files,
     summary: {
+      status,
       filesChanged: files.filter((f) => f.changed).length,
       entriesApplied,
       entriesSkipped,
       entriesNoop,
+      blockedCount,
       lintErrors: lintErrorCount,
     },
     errors: topErrors,
