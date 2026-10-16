@@ -90,6 +90,12 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
                             ▼
         R3 差异分析器 ────► change_plan.json ★ 人可读可改
                             + change_plan.md（人工修正清单）
+                            ▼
+存量 FGUI 工程 ──► project-index ──► project_index.json（工程/资源/组件/引用图/复用）
+                            ▼
+        gen-xml prepare ────► gen_plan.json ★ 人可读可改（含 SHA-256 指纹）
+        gen-xml dryrun  ────► 内存打补丁 + lint + 逐行 diff（对工程零写入）
+        gen-xml apply   ────► 事务写盘（漂移校验 + lint 门禁 + .bak + 原子替换 + 回滚）
 ```
 
 ### 命令
@@ -100,8 +106,9 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 | `asset-search` | 三通道检索 + 人工确认写缓存 | `slot-map.json`（二次运行零重算） |
 | `psd-ir` | 解析 PSD → Design IR（支持多份一次解析） | `design_ir.<label>.json` `ir_overlay.<label>.html` |
 | `diff-plan` | 两份 IR 的四级匹配 + 七类差异分类 | `change_plan.json` `change_plan.md` |
+| `project-index` | **只读**解析存量 FGUI 工程（包/组件/资源/引用图/复用） | `project_index.json` |
+| `gen-xml` | 生成侧三阶段：`prepare`（出编辑脚本）→ `dryrun`（零写入预演）→ `apply`（事务写盘） | `gen_plan.json` `dryrun_report.{json,md}` `apply_report.{json,md}` |
 | `selftest` | 一键跑通全链路 | 全套 |
-| `gen-xml` | **[P1 桩]** 诚实上报「未实现 + 缺什么」 | — |
 
 ### 退出码（脚本可据此判断能否进下一步）
 
@@ -109,10 +116,10 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 |---|---|
 | 0 | 成功 |
 | 1 | 未预期异常 |
-| 2 | 参数错误 / 功能未就绪 |
-| 3 | lint 阻断，未写盘（P1） |
-| **4** | **存在未确认 `INFERRED` 或未确认的歧义匹配（同名多候选），产物已生成但不可进下一步** |
-| 5 | 写盘事务失败，已回滚（P1） |
+| 2 | 参数错误 / **指纹漂移**（prepare 后文件被改动）/ 目标文件找不到 |
+| 3 | lint 阻断，**未写盘** |
+| **4** | **人工确认门禁**：存在未确认 `INFERRED` 或未确认的歧义匹配；或 `apply` 缺 `--yes` |
+| 5 | 写盘事务失败，**已回滚** |
 
 ---
 
@@ -324,23 +331,32 @@ D:\UItool\
 
 ---
 
-## 本轮范围与已知限制
+## 当前范围与已知限制
 
-**已完成：** P0（R1 素材索引 + R2 PSD 解析 + R3 差异分析）全链路自测；
-P1-a 契约层（FGUI 常量表 / 纯函数 lint / 事务写盘）—— 纯函数部分可完整单测。
+**已完成：**
+- **P0**：切图索引 + PSD 解析 + 差异分析（离线闭环）
+- **P1-a**：FGUI 契约层（常量表 / 纯函数 lint / 事务写盘）
+- **M1**：只读 FGUI Project Indexer（`project-index`）
+- **M2**：`gen-xml` 生成侧三阶段增量构建（prepare → dryrun → apply），含人工确认门禁、SHA-256 防漂移、lint 写盘门禁、`.bak` 备份与失败回滚
 
-**未实现：** R4 `gen-xml`（生成组件 XML）与 R5（现场验证发布包）。
-本机无 FairyGUI / Unity / C# 环境，写出的 XML 没有任何办法验证 ——
-`gen-xml` 命令会诚实上报未实现，并列出被阻塞的问题（Q1~Q6）。
+全部产物确定性（同输入逐字节一致），`npm test` 515 项全绿，CI 在 Windows + Linux 双平台通过。
+
+**未实现：** R5 现场验证发布包（`gen-xml apply` 的真实编辑器对账）。
+本机无 FairyGUI / Unity / C# 环境，**写出的 XML 没有任何办法在真实编辑器里验证**——这是当前最大的可信度边界。
 
 已知限制（诚实清单）：
 
 | 项 | 说明 |
 |---|---|
 | 九宫格阈值 | 对**合成数据**标定，QA 脚本仍有 6 项阈值 fail；需真实素材重标（阈值全外置在 `fgui.config.json`，不必改代码） |
-| `merged` / `suspectedMerged` 启发式 | **尚未用真实 PSD 测量误报率**；当前设计成「不影响匹配路径、只影响未命中去向」，误报的代价已被压到最低，但真实数据下的表现待验证 |
+| `merged` / `suspectedMerged` 启发式 | **尚未用真实 PSD 测量误报率**；设计成「不影响匹配路径、只影响未命中去向」，误报代价已压到最低 |
 | 素材索引特征 | pHash 对纯色/大面积平涂会退化（已加面积比+形状比门槛兜底，仍属启发式） |
-| 生成侧验证 | 无 FGUI 工程副本，P1 的 lint/事务写盘只在单测层验证，未对真实编辑器产物对账 |
+| 包 id 落盘位置未确认 | 扫描真实（合成）工程时找不到明确的包 id 字段，只能从 `ui://` 引用反推；反推不到时**按包名降级并显式告警**，不静默 |
+| z-order 不推断 | 新增节点一律追加到 `displayList` 末尾（= 最上层），并在产物里记录该决策；不猜层级 |
+| 控件类型不猜 | 上游策略提示「需人工指定控件类型」时只写入 note，由人在 `gen_plan.json` 里改 `patch.tag` |
+| 生成侧验证深度 | lint/事务写盘/三阶段已由单元、接缝（真 `buildGenPlan` → `runDryrun`）与全链路 e2e（含 3 变异 + 回滚 + B9）覆盖，但**未对真实编辑器产物对账** |
+
+验证记录：`test/` 下的单元与 e2e（`test/e2e/gen-xml-pipeline.test.js`、`test/unit/gen-plan-seam.test.js` 等）都可重复执行，结论以代码与测试为准。
 
 完整实测记录（确定性 md5 证据、与架构文档的偏差、哪些验收项因缺真实素材
 暂无法验证）见仓库内 `qa/`、`qa-round2/`、`qa-p1a/` 三个独立验证目录——
