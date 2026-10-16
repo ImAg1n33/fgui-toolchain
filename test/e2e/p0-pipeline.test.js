@@ -521,12 +521,15 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
     fs.mkdirSync(path.join(dir, 'assets/MailDetail'), { recursive: true });
     fs.writeFileSync(path.join(dir, rel), '<?xml version="1.0" encoding="utf-8"?>\n<component/>\n');
 
+    // 白名单（登记集合）：本用例的目标文件是「已登记」的那一个
+    const allowed = buildAllowedTargets({ components: [{ file: rel }] }, dir, ROOT);
+
     // (a) 主解析：工程根相对 → 直接命中，且不告警
     const warned = [];
     const logger = {
       warn: (m, d) => warned.push(`${m} ${JSON.stringify(d || {})}`), info: () => {}, error: () => {},
     };
-    const abs = resolveTargetPath(dir, ROOT, rel, logger);
+    const abs = resolveTargetPath(dir, ROOT, rel, logger, allowed);
     assert.equal(abs, path.resolve(dir, rel), '主解析必须是 path.resolve(projectRoot, target.file)');
     assert.deepEqual(warned, [], '工程根命中时不得触发兜底告警');
 
@@ -537,7 +540,8 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
     const logger2 = {
       warn: (m) => warned2.push(String(m)), info: () => {}, error: () => {},
     };
-    const abs2 = resolveTargetPath(FGUI_FIXTURE, ROOT, fallbackRel, logger2);
+    const allowedFallback = buildAllowedTargets({ components: [{ file: fallbackRel }] }, FGUI_FIXTURE, ROOT);
+    const abs2 = resolveTargetPath(FGUI_FIXTURE, ROOT, fallbackRel, logger2, allowedFallback);
     assert.equal(abs2, path.resolve(ROOT, fallbackRel));
     assert.ok(warned2.some((w) => /rootDir/.test(w)), '兜底命中必须 stderr 告警');
 
@@ -547,8 +551,7 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
       (err) => err.code === 'USAGE' && err.exitCode === EXIT.USAGE,
     );
 
-    // ---- P0-A 路径逃逸防护 ----
-    const allowed = buildAllowedTargets({ components: [{ file: rel }] }, dir, ROOT);
+    // ---- P0-A / P0-1 路径逃逸防护 ----
 
     // (d) `..` 逃逸 → 拒绝
     const outsideDir = path.join(dir, '..', 'escape-out');
@@ -560,17 +563,17 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
       '`..` 逃逸必须被拒绝',
     );
 
-    // (e) 绝对路径（指向工程根之外的真实文件）→ 拒绝
+    // (e) 绝对路径（指向工程根之外的真实文件）→ 拒绝（形态约束 ⓪ 直接拦下）
     assert.throws(
       () => resolveTargetPath(dir, ROOT, path.join(ROOT, 'package.json'), logger, allowed),
-      (err) => err.code === 'USAGE',
-      '绝对路径越界必须被拒绝',
+      (err) => err.code === 'USAGE' && /相对路径/.test(err.message),
+      '绝对路径必须被拒绝且提示"必须是相对路径"',
     );
     // (e2) 带盘符形态（仅 Windows 有意义；POSIX 下路径不含盘符，跳过）
     if (process.platform === 'win32') {
       assert.throws(
         () => resolveTargetPath(dir, ROOT, 'C:\\Windows\\win.ini', logger, allowed),
-        (err) => err.code === 'USAGE',
+        (err) => err.code === 'USAGE' && /相对路径/.test(err.message),
         '带盘符绝对路径必须被拒绝',
       );
     }
@@ -578,11 +581,33 @@ test('CLI: gen-xml 目标文件解析 —— 主解析走工程根，命中即�
     // (f) 工程根之内但**未在 index 登记**的文件 → 拒绝（不能「文件存在就允许写」）
     fs.mkdirSync(path.join(dir, 'assets/Other'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'assets/Other/Other.xml'), '<component/>\n');
-    assert.equal(resolveTargetPath(dir, ROOT, rel, logger, allowed), path.resolve(dir, rel), '已登记文件应放行');
+    assert.equal(resolveTargetPath(dir, ROOT, rel, logger, allowed), path.resolve(dir, rel), '已登记文件应放行（正对照）');
     assert.throws(
       () => resolveTargetPath(dir, ROOT, 'assets/Other/Other.xml', logger, allowed),
-      (err) => err.code === 'USAGE',
+      (err) => err.code === 'USAGE' && /登记/.test(err.message),
       '未登记组件必须被拒绝',
+    );
+
+    // (h) ★ P0-1：**空索引**（components 为空）→ 白名单为空即默认拒绝 ★
+    //     （改前：`allowedTargets.size` 前提让整条检查被短路 → 未登记文件被改写）
+    const emptyAllowed = buildAllowedTargets({ components: [] }, dir, ROOT);
+    assert.equal(emptyAllowed.size, 0);
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, 'assets/Other/Other.xml', logger, emptyAllowed),
+      (err) => err.code === 'USAGE' && /没有任何已登记组件/.test(err.message),
+      '空索引必须默认拒绝（P0-1）',
+    );
+    // 连"已登记"的文件在空索引下也必须拒绝 —— 白名单为空即无任何可写目标
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, rel, logger, emptyAllowed),
+      (err) => err.code === 'USAGE' && /没有任何已登记组件/.test(err.message),
+      '空索引下即使是工程内文件也必须拒绝',
+    );
+    // 完全不传白名单 → 同样默认拒绝（守卫「没名单就拒绝」）
+    assert.throws(
+      () => resolveTargetPath(dir, ROOT, rel, logger),
+      (err) => err.code === 'USAGE' && /没有任何已登记组件/.test(err.message),
+      '未提供白名单必须默认拒绝',
     );
 
     // (g) 软链逃逸：工程根内的软链指向外部 → realpath 校验应拒绝

@@ -164,12 +164,13 @@ function buildAllowedTargets(projectIndex, projectRoot, rootDir) {
  *   CLI 的 `--root` 拼，且**命中时必须 stderr 告警**（绝不静默换基准）。兜底结果同样要过下面
  *   的全部边界校验（只有落在工程根内才可能通过）。
  *
- * ★ P0-A 路径逃逸防护（四条，缺一不可）★
- *   `gen_plan.json` 的定位就是「人可编辑」，所以只靠 SHA-256 防漂移挡不住「人自己改
- *   target.file 并同步改哈希」。校验：
+ * ★ P0-A / P0-1 路径逃逸防护（`gen_plan.json` 的路径一律视为**不可信输入**）★
+ *   只靠 SHA-256 防漂移挡不住「人自己改 target.file 并同步改哈希」。校验：
+ *     ⓪ `target.file` 必须是**相对路径形态**（绝对路径 / 带盘符 / 以分隔符开头 → 直接拒绝）；
  *     ① 解析结果必须**位于工程根之内**（路径段比较）；
  *     ② `fs.realpathSync` 解析符号链接后的真实路径仍须在工程根内（防软链跳出）；
- *     ③ 目标文件必须是 `project_index.components[].file` 里**登记过**的组件 XML；
+ *     ③ 目标必须是 `project_index.components[].file` 里**登记过**的组件 XML ——
+ *        ★ 白名单为空时**默认拒绝**（P0-1：原实现写成「有名单才查」，空索引会短路跳过整条检查）★；
  *     ④ `outside-root/` 跨盘降级形态继续拒绝。
  *
  * @param {string} projectRoot
@@ -182,6 +183,16 @@ function buildAllowedTargets(projectIndex, projectRoot, rootDir) {
 function resolveTargetPath(projectRoot, rootDir, relFile, logger, allowedTargets) {
   if (!relFile || typeof relFile !== 'string') {
     throw new AppError(CODES.USAGE, '目标组件缺少 file 字段：project_index.components 未提供 file');
+  }
+  // ⓪ 形态约束（与 README 声明一致，**显式拒绝**而非靠后置校验顺带挡住）：
+  //    target.file 必须是**工程根内的相对路径**。绝对路径 / 带盘符 / 以分隔符开头
+  //    一律直接拒绝 —— 这是「不可信输入」的第一道门。
+  if (path.isAbsolute(relFile) || /^[A-Za-z]:[\\/]/.test(relFile)
+      || relFile.startsWith('/') || relFile.startsWith('\\')) {
+    throw new AppError(CODES.USAGE,
+      `target.file 必须是工程根内的相对路径，但收到绝对路径形态：${JSON.stringify(relFile)}`
+      + '（P0-A：gen_plan.json 的路径一律视为不可信输入）',
+      { targetFile: relFile });
   }
   // ④ 跨盘降级形态：不含绝对路径信息，无法定位 → 拒绝
   if (relFile.startsWith('outside-root/')) {
@@ -221,8 +232,17 @@ function resolveTargetPath(projectRoot, rootDir, relFile, logger, allowedTargets
       `目标文件经符号链接解析后逃出工程根，拒绝写入：${realAbs}（工程根 ${realRoot}）`,
       { targetFile: relFile, resolved: abs, realpath: realAbs, projectRoot: realRoot });
   }
-  // ③ 必须是登记过的组件 XML（不能「文件存在就允许写」）
-  if (allowedTargets && allowedTargets.size && !allowedTargets.has(normCase(realAbs))) {
+  // ③ 必须是登记过的组件 XML —— ★ 白名单为空 = **默认拒绝**（P0-1）★
+  //   原实现写成 `allowedTargets && allowedTargets.size && !has(...)` —— 这等于
+  //   「有名单才查」，于是「索引里一个组件都没登记」时整条检查被**短路跳过**，
+  //   而那恰恰是白名单最需要生效的时刻。守卫必须反过来：**没名单就拒绝**。
+  if (!allowedTargets || allowedTargets.size === 0) {
+    throw new AppError(CODES.USAGE,
+      '工程索引里没有任何已登记组件（project_index.components 为空），拒绝写入'
+      + ' —— 请先在**正确的工程根**上跑 `project-index` 生成索引后再重试（P0-1：白名单为空即默认拒绝）',
+      { targetFile: relFile, resolved: abs, allowedCount: 0 });
+  }
+  if (!allowedTargets.has(normCase(realAbs))) {
     throw new AppError(CODES.USAGE,
       `目标文件不在 project_index.components[].file 登记范围内，拒绝写入：${abs}`
       + ' —— 只有工程里已登记的组件 XML 才允许被 gen-xml 改写（P0-A）',
