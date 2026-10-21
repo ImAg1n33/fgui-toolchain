@@ -167,7 +167,8 @@ test('③ 画布 750x1334 + 命名前缀 + 层级底→顶 + 背景 img_bg 在�
   assert.equal(runCreatePlan(f).code, 0);
   const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
 
-  assert.deepEqual(plan.canvas, { w: 750, h: 1334 });
+  assert.deepEqual(plan.canvas.w ? { w: plan.canvas.w, h: plan.canvas.h } : null, { w: 750, h: 1334 });
+  assert.equal(plan.canvas.source, 'ir', '★ 未传 --canvas → 跟随 IR 画布');
   assert.deepEqual(plan.page.size, [750, 1334]);
   assert.equal(plan.page.pkg, 'Mail');
 
@@ -196,8 +197,68 @@ test('③ 画布 750x1334 + 命名前缀 + 层级底→顶 + 背景 img_bg 在�
   const f2 = setup('canvas');
   assert.equal(runCreatePlan(f2, ['--canvas', '1080x1920']).code, 0);
   const plan2 = JSON.parse(fs.readFileSync(path.join(f2.out, 'create_plan.json'), 'utf8'));
-  assert.deepEqual(plan2.canvas, { w: 1080, h: 1920 });
+  assert.deepEqual({ w: plan2.canvas.w, h: plan2.canvas.h }, { w: 1080, h: 1920 });
+  assert.equal(plan2.canvas.source, 'cli');
+  assert.equal(plan2.canvas.mismatch, true, '★ 与 IR 画布（750x1334）不一致必须标 mismatch');
+  assert.deepEqual(plan2.canvas.irCanvas, { w: 750, h: 1334 });
   assert.deepEqual(plan2.page.size, [1080, 1920]);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// P0 画布：缺省必须跟随 IR（否则整页比例全错且不报错）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0① IR 1080x1920、无 --canvas → 输出 1080x1920 + source=ir（改前会错成 750x1334）', () => {
+  const f = setup('canvas-ir');
+  const ir = irFixture();
+  ir.source.canvas = { w: 1080, h: 1920 };
+  // 背景也要跟着画布尺寸（否则背景覆盖判定会按旧尺寸）
+  ir.layers[ir.layers.length - 1].bbox = { x: 0, y: 0, w: 1080, h: 1920 };
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+
+  const r = runCreatePlan(f);
+  assert.equal(r.code, 0);
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 1080, h: 1920 },
+    '★ 缺省必须用 IR 画布，不能硬编码 750x1334');
+  assert.equal(plan.canvas.source, 'ir');
+  assert.equal(plan.canvas.mismatch, undefined);
+  assert.deepEqual(plan.page.size, [1080, 1920]);
+  assert.equal(plan.nodes[0].name, 'img_bg');
+  assert.equal(plan.nodes[0].attrs.size, '1080,1920');
+  // stderr 不应有画布相关告警
+  assert.ok(!/画布/.test(r.stderr), '跟随 IR 时不应有画布告警');
+});
+
+test('★ P0② IR 1080x1920 + --canvas 750x1334 → 输出 750x1334、mismatch=true、stderr 告警', () => {
+  const f = setup('canvas-mismatch');
+  const ir = irFixture();
+  ir.source.canvas = { w: 1080, h: 1920 };
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+
+  const r = runCreatePlan(f, ['--canvas', '750x1334']);
+  assert.equal(r.code, 0, '不一致不阻断（只把问题摆明）');
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 750, h: 1334 });
+  assert.equal(plan.canvas.source, 'cli');
+  assert.equal(plan.canvas.mismatch, true);
+  assert.deepEqual(plan.canvas.irCanvas, { w: 1080, h: 1920 });
+  assert.ok(/不一致/.test(r.stderr) && /未做缩放换算/.test(r.stderr),
+    `★ stderr 必须写明不一致且未缩放，实际: ${r.stderr.slice(0, 300)}`);
+});
+
+test('★ P0③ IR 无 canvas 字段 → 750x1334 + source=default + stderr 告警', () => {
+  const f = setup('canvas-default');
+  const ir = irFixture();
+  delete ir.source.canvas;
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+
+  const r = runCreatePlan(f);
+  assert.equal(r.code, 0);
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 750, h: 1334 });
+  assert.equal(plan.canvas.source, 'default');
+  assert.ok(/默认/.test(r.stderr), '★ 退回默认必须在 stderr 告警');
 });
 
 // ════════════════════════════════════════════════════════════════════════════

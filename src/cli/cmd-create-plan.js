@@ -53,14 +53,15 @@ async function run(ctx) {
 
   const ir = readJson(irPath);
   const projectIndex = readJson(indexPath);
-  const canvas = parseCanvas(flagStr(flags.canvas));
+  // ★ 未传 --canvas → null（交由 plan-builder 用 IR 自己的画布；不再硬编码默认值）★
+  const cliCanvas = parseCanvas(flagStr(flags.canvas));
   const pageName = flagStr(flags['page-name']);
   const pkg = flagStr(flags.pkg);
 
   const plan = buildCreatePlan({
     ir,
     projectIndex,
-    canvas,
+    canvas: cliCanvas || undefined,
     pageName,
     pkg,
     normalizeOpts: config && config.normalize ? config.normalize : undefined,
@@ -74,10 +75,17 @@ async function run(ctx) {
   fs.writeFileSync(mdPath, renderPlanMarkdown(plan), 'utf8');
 
   if (logger) {
+    // ★ 画布来源/不一致必须在 stderr 明说（P0：坐标基准错了整页就错）★
+    for (const w of plan.warnings) {
+      if (w.code === 'CANVAS_FALLBACK_DEFAULT' || w.code === 'CANVAS_MISMATCH') {
+        logger.warn(w.msg, { canvas: plan.canvas });
+      }
+    }
     logger.info('create_plan 已生成', {
       page: plan.page.name, pkg: plan.page.pkg, nodes: plan.summary.nodes,
       reused: plan.summary.reused, toImport: plan.summary.toImport,
       unresolved: plan.summary.unresolved,
+      canvas: `${plan.canvas.w}x${plan.canvas.h}(${plan.canvas.source})`,
     });
     if (plan.assets.toImport.length) {
       logger.warn('有素材需要先导入并登记 package.xml（详见 create_plan.md 的「待人工确认」）', {

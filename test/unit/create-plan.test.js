@@ -101,14 +101,58 @@ test('命名清洗: 复用 normalizeName 后再压非法字符（空格/标点 �
   assert.equal(sanitizeName('reward_icon(1).png'), 'reward_icon', 'normalizeName 默认去副本后缀');
 });
 
-test('画布: 默认 750x1334；--canvas 覆盖；非法格式抛 AppError', () => {
-  assert.deepEqual(parseCanvas(undefined), { w: 750, h: 1334 });
+test('画布解析: 未传 → null（不是默认值）；显式值解析；非法格式抛 AppError', () => {
+  // ★ P0：未传必须返回 null，才能与「用户真的传了 750x1334」区分开 ★
+  assert.equal(parseCanvas(undefined), null);
+  assert.equal(parseCanvas(''), null);
   assert.deepEqual(parseCanvas('1080x1920'), { w: 1080, h: 1920 });
   assert.deepEqual(parseCanvas('750X1334'), { w: 750, h: 1334 });
   assert.deepEqual(parseCanvas('750*1334'), { w: 750, h: 1334 });
   for (const bad of ['750', 'axb', '0x100', '-1x100']) {
     assert.throws(() => parseCanvas(bad), (e) => e instanceof AppError, `${bad} 应抛错`);
   }
+});
+
+test('★ P0 画布决策: 未传 --canvas → 用 IR 自带画布（source=ir）', () => {
+  const ir = irFixture();
+  ir.source.canvas = { w: 1080, h: 1920 };
+  const plan = build({ ir });
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 1080, h: 1920 },
+    '★ 缺省必须跟随 IR 画布，不能硬编码 750x1334');
+  assert.equal(plan.canvas.source, 'ir');
+  assert.equal(plan.canvas.mismatch, undefined);
+  assert.deepEqual(plan.page.size, [1080, 1920]);
+  assert.ok(!plan.warnings.some((w) => w.code === 'CANVAS_FALLBACK_DEFAULT'));
+});
+
+test('★ P0 画布决策: IR 与 CLI 不一致 → source=cli + mismatch + irCanvas + warning', () => {
+  const ir = irFixture();
+  ir.source.canvas = { w: 1080, h: 1920 };
+  const plan = build({ ir, canvas: { w: 750, h: 1334 } });
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 750, h: 1334 }, 'CLI 显式值优先');
+  assert.equal(plan.canvas.source, 'cli');
+  assert.equal(plan.canvas.mismatch, true);
+  assert.deepEqual(plan.canvas.irCanvas, { w: 1080, h: 1920 });
+  const w = plan.warnings.find((x) => x.code === 'CANVAS_MISMATCH');
+  assert.ok(w, '★ 不一致必须 warning');
+  assert.ok(w.msg.includes('未做缩放换算'), 'warning 应说明没做缩放');
+});
+
+test('★ P0 画布决策: IR 无 canvas → 退回 750x1334 + source=default + warning', () => {
+  const ir = irFixture();
+  delete ir.source.canvas;
+  const plan = build({ ir });
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 750, h: 1334 });
+  assert.equal(plan.canvas.source, 'default');
+  assert.ok(plan.warnings.some((w) => w.code === 'CANVAS_FALLBACK_DEFAULT'), '★ 退回默认必须告警');
+});
+
+test('画布决策: CLI 与 IR 一致时不设 mismatch（不制造假告警）', () => {
+  const ir = irFixture(); // IR canvas 750x1334
+  const plan = build({ ir, canvas: { w: 750, h: 1334 } });
+  assert.equal(plan.canvas.source, 'cli');
+  assert.equal(plan.canvas.mismatch, undefined);
+  assert.ok(!plan.warnings.some((w) => w.code === 'CANVAS_MISMATCH'));
 });
 
 test('页面名: 显式 > IR psdPath 基名 > Page', () => {
@@ -347,7 +391,8 @@ test('外壳: version/mode/canvas/page/nodes/components/assets/deferred/unresolv
   const plan = build({ canvas: { w: 1080, h: 1920 }, pageName: 'MailPagePopup', pkg: 'Mail' });
   assert.equal(plan.version, '0.1');
   assert.equal(plan.mode, 'create');
-  assert.deepEqual(plan.canvas, { w: 1080, h: 1920 });
+  assert.deepEqual({ w: plan.canvas.w, h: plan.canvas.h }, { w: 1080, h: 1920 });
+  assert.equal(plan.canvas.source, 'cli', '显式 --canvas → source=cli');
   assert.deepEqual(plan.page, { name: 'MailPagePopup', pkg: 'Mail', size: [1080, 1920] });
   assert.ok(Array.isArray(plan.nodes) && plan.nodes.length === 8);
   assert.deepEqual(plan.components, []);

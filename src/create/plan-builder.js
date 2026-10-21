@@ -53,12 +53,17 @@ const BG_NAME = 'img_bg';
 
 /**
  * 解析 `--canvas 750x1334`。
+ *
  * @param {string|undefined|null} s
- * @returns {{w:number, h:number}}
+ * @returns {{w:number, h:number}|null} 未传时返回 **null**（表示「未指定」，
+ *          由 resolveCanvas 决定用 IR 画布还是默认值）；传了但格式非法则抛错
  * @throws {AppError} BAD_ARGUMENT
  */
 function parseCanvas(s) {
-  if (s === undefined || s === null || s === '') return { ...DEFAULT_CANVAS };
+  // ★ 未传 → null（不是默认值）★
+  //   这是 P0 修复的关键：缺省时必须能区分「用户没传」与「用户传了 750x1334」，
+  //   否则无法在「用 IR 自己的画布」与「CLI 显式覆盖」之间做正确决策。
+  if (s === undefined || s === null || s === '') return null;
   const m = /^\s*(\d+)\s*[xX*]\s*(\d+)\s*$/.exec(String(s));
   if (!m) {
     throw new AppError(CODES.BAD_ARGUMENT,
@@ -70,6 +75,59 @@ function parseCanvas(s) {
     throw new AppError(CODES.BAD_ARGUMENT, `--canvas 宽高必须为正整数，实际 ${JSON.stringify(s)}`);
   }
   return { w, h };
+}
+
+/**
+ * 决定最终画布：**CLI 显式 > IR 自带 > 默认 750×1334**（P0 修复）。
+ *
+ * ★ 为什么不能硬编码默认值 ★（外部审查 P0）
+ *   真实 PSD 若为 1080×1920，而我们把原始像素坐标塞进 750×1334 的页面，
+ *   等于**整页比例全错且不报错** —— 直接违背「与效果图 100% 重合」。
+ *   故缺省时必须跟随 IR 自己的画布。
+ *
+ * 注意：我们**不做自动缩放换算**。CLI 覆盖值与 IR 画布不一致时，只把
+ * 「不一致」明确摆出来（`mismatch` + warning），交人确认。
+ *
+ * @param {Object} a
+ * @param {{w:number,h:number}|null} [a.cliCanvas] 用户显式传入（parseCanvas 的结果）
+ * @param {Object} [a.ir]
+ * @returns {{canvas:{w:number,h:number,source:string,mismatch?:boolean,irCanvas?:Object},
+ *            warnings:Object[]}}
+ */
+function resolveCanvas(a = {}) {
+  const cli = a.cliCanvas && Number.isFinite(a.cliCanvas.w) && Number.isFinite(a.cliCanvas.h)
+    ? { w: a.cliCanvas.w, h: a.cliCanvas.h } : null;
+  const irCanvas = (a.ir && a.ir.source && a.ir.source.canvas
+    && Number.isFinite(a.ir.source.canvas.w) && Number.isFinite(a.ir.source.canvas.h))
+    ? { w: a.ir.source.canvas.w, h: a.ir.source.canvas.h } : null;
+
+  if (cli) {
+    const out = { w: cli.w, h: cli.h, source: 'cli' };
+    if (irCanvas && (irCanvas.w !== cli.w || irCanvas.h !== cli.h)) {
+      out.mismatch = true;
+      out.irCanvas = { w: irCanvas.w, h: irCanvas.h };
+      return {
+        canvas: out,
+        warnings: [{
+          code: 'CANVAS_MISMATCH',
+          msg: `--canvas ${cli.w}x${cli.h} 与 IR 画布 ${irCanvas.w}x${irCanvas.h} 不一致 ——`
+            + 'IR 坐标**未做缩放换算**（绝对定位按原像素写入），请确认页面尺寸后再构建',
+        }],
+      };
+    }
+    return { canvas: out, warnings: [] };
+  }
+  if (irCanvas) {
+    return { canvas: { w: irCanvas.w, h: irCanvas.h, source: 'ir' }, warnings: [] };
+  }
+  return {
+    canvas: { w: DEFAULT_CANVAS.w, h: DEFAULT_CANVAS.h, source: 'default' },
+    warnings: [{
+      code: 'CANVAS_FALLBACK_DEFAULT',
+      msg: `IR 未提供画布尺寸（source.canvas），已退回默认 ${DEFAULT_CANVAS.w}x${DEFAULT_CANVAS.h}`
+        + ' —— 若真实设计稿尺寸不同，整页比例会错，请用 --canvas 显式指定',
+    }],
+  };
 }
 
 /**
@@ -215,8 +273,10 @@ function buildCreatePlan(args = {}) {
     throw new AppError(CODES.BAD_ARGUMENT, 'buildCreatePlan 需要含 layers[] 的 Design IR 对象');
   }
   const projectIndex = args.projectIndex && typeof args.projectIndex === 'object' ? args.projectIndex : {};
-  const canvas = args.canvas && Number.isFinite(args.canvas.w) && Number.isFinite(args.canvas.h)
-    ? { w: args.canvas.w, h: args.canvas.h } : { ...DEFAULT_CANVAS };
+  // ★ P0：画布缺省跟随 IR（不再硬编码 750×1334）★
+  const resolvedCanvas = resolveCanvas({ cliCanvas: args.canvas, ir });
+  const canvas = resolvedCanvas.canvas;
+  const warnings = resolvedCanvas.warnings.slice();
   const normOpts = args.normalizeOpts && typeof args.normalizeOpts === 'object'
     ? args.normalizeOpts : { stripCopySuffix: false, stripExtension: true, useVariants: true };
 
@@ -235,7 +295,6 @@ function buildCreatePlan(args = {}) {
   const toImport = [];
   const unresolved = [];
   const deferred = { controllers: [], relations: [], listItems: [] };
-  const warnings = [];
 
   // ★ 层级编号：背景固定 0，其余按「底→顶」从 0（无背景）或 1（有背景）连续递增。
   //   不能直接用数组下标 —— 背景在 IR 里的位置可能不是最后一个（画师可能把它放顶层），
@@ -459,6 +518,9 @@ function buildCreatePlan(args = {}) {
       + 'v1 不调用 Bridge、不写任何 FGUI 文件；deferred 区块交由人工确认。'
       + '本文件可人工编辑（改 name/attrs/layer）后交给后续导入步骤。',
     _fieldNote: {
+      'canvas.source': 'ir = 取自 Design IR 自带画布（默认）；cli = --canvas 显式指定；'
+        + 'default = IR 与 CLI 都没有，已退回 750x1334（会发 warning）',
+      'canvas.mismatch': 'true 表示 --canvas 与 IR 画布不一致；IR 坐标**未做缩放换算**，需人工确认',
       nodes: '页面直接子节点，按 layer 升序（0 = 最底，背景固定 img_bg）',
       'nodes[].attrs': 'xy/size 取 IR bbox（绝对定位，不做整体缩放换算）；'
         + '**例外**：资源固有尺寸与 bbox 不一致的图标/立绘，等比缩放（上限 1，不放大）并在 bbox 内居中',
@@ -468,7 +530,8 @@ function buildCreatePlan(args = {}) {
       deferred: 'controllers / relations / listItems —— v1 一律只给建议，不自动生成',
       unresolved: '结构性未决项（如 non-uniform-scale、ambiguous-asset），必须人工处理',
     },
-    canvas: { w: canvas.w, h: canvas.h },
+    // ★ canvas.source 必须落盘：ir / cli / default —— 让人一眼看出坐标基准来自哪 ★
+    canvas,
     page: { name: pageName, pkg, size: [canvas.w, canvas.h] },
     nodes,
     components: [], // v1 不建组件（列表项只在 deferred 给建议）
@@ -576,6 +639,7 @@ function ensureUniqueNames(nodes) {
 module.exports = {
   buildCreatePlan,
   parseCanvas,
+  resolveCanvas,
   sanitizeName,
   sanitizeComponentName,
   pickPageName,

@@ -19,9 +19,18 @@ function renderPlanMarkdown(plan) {
 
   push(`# CREATE 计划：${(p.page && p.page.name) || '(未命名)'}`);
   push('');
+  // ★ 画布来源必须醒目：坐标基准错了整页就错（外部审查 P0）★
+  const cv = p.canvas || {};
+  const srcText = { ir: '来自 Design IR', cli: '--canvas 显式指定', default: '⚠️ 默认值（IR 未提供画布）' }[cv.source]
+    || '(未知)';
+  const mismatch = cv.mismatch
+    ? ` —— ⚠️ 与 IR 画布 ${cv.irCanvas ? `${cv.irCanvas.w}×${cv.irCanvas.h}` : '?'} 不一致，`
+      + 'IR 坐标**未做缩放换算**，请确认'
+    : '';
+  push(`> **画布：${cv.w}×${cv.h}（${srcText}）**${mismatch}`);
+  push('');
   push(`- 模式：**CREATE**（只由 Design IR + 工程索引生成，不依赖任何已存在的组件 XML）`);
   push(`- 目标包：\`${(p.page && p.page.pkg) || '(未指定)'}\``);
-  push(`- 画布：${p.canvas ? `${p.canvas.w}×${p.canvas.h}` : '?'}`);
   push(`- 节点数：${s.nodes}（复用资源 ${s.reused}，待导入 ${s.toImport}，未决 ${s.unresolved}）`);
   push('');
 
