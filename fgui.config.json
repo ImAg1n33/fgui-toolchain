@@ -86,6 +86,7 @@
     "colorAttributes": ["color", "strokeColor", "fillColor"],
     "colorRequireAlpha": false,
     "urlAttributes": ["src", "url", "icon", "defaultItem"],
+    "uiRefAttributes": ["src", "url", "icon", "defaultItem", "font"],
     "exportedRequired": true,
     "maxObjectsPerComponent": 80,
     "bannedNamePatterns": ["^n\\d+$", "^img\\d+$", "^node\\d*$", "^\\d+$"],

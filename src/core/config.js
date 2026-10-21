@@ -84,6 +84,9 @@ function defaultConfig() {
       colorAttributes: ['color', 'strokeColor', 'fillColor'],
       colorRequireAlpha: false,
       urlAttributes: ['src', 'url', 'icon', 'defaultItem'],
+      // R-04 专用：哪些属性里的 ui:// 要做引用合法性校验（含 font）。
+      // 与 urlAttributes 分开：后者是"指向可测量资源的属性"（R-05/R-10 用）。
+      uiRefAttributes: ['src', 'url', 'icon', 'defaultItem', 'font'],
       exportedRequired: true,
       maxObjectsPerComponent: 80,
       bannedNamePatterns: ['^n\\d+$', '^img\\d+$', '^node\\d*$', '^\\d+$'],

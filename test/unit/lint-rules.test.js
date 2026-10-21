@@ -749,3 +749,74 @@ test('★ R-11: src 含 ui:// → 交给 R-04，本规则不重复报', () => {
   assert.deepEqual(byRule(r, 'R-11'), [], 'ui:// 形态不由 R-11 处理');
   assert.deepEqual(byRule(r, 'R-04'), [], 'ui:// 形态由 R-04 校验且合法');
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// 十一、font 引用纳入 R-04（专用清单 uiRefAttributes），但不污染 urlAttributes
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 真实工程字体引用：`font="ui://mtlga5qj8yoa8k"`（拼接）。需要校验。
+// 但不能把 `font` 塞进 `urlAttributes` —— 那份清单被 R-05/R-10 用来
+// "找这个元素引用的图片去量宽高"，混进 font 会让 `<text font="ui://...">`
+// 被当成引用了一张图 → 新误报。
+
+const { parseUiRef } = require('../../src/fgui/resource-resolver');
+
+test('★ parseUiRef: 含 "/" 一律按 slash 拆（6 位包 id 不再被 concat 硬切掩藏）', () => {
+  assert.deepEqual(parseUiRef('ui://abc123/x'),
+    { raw: 'ui://abc123/x', style: 'slash', pkgId: 'abc123', itemId: 'x' });
+  assert.deepEqual(parseUiRef('ui://mtlga5qj/8yoa8k'),
+    { raw: 'ui://mtlga5qj/8yoa8k', style: 'slash', pkgId: 'mtlga5qj', itemId: '8yoa8k' });
+});
+
+test('★ parseUiRef: 不含 "/" 才走 concat（真实工程写法）', () => {
+  assert.deepEqual(parseUiRef('ui://mtlga5qj8yoa8k'),
+    { raw: 'ui://mtlga5qj8yoa8k', style: 'concat', pkgId: 'mtlga5qj', itemId: '8yoa8k' });
+  assert.deepEqual(parseUiRef('ui://e5f6a7b8a7b8c9d0'),
+    { raw: 'ui://e5f6a7b8a7b8c9d0', style: 'concat', pkgId: 'e5f6a7b8', itemId: 'a7b8c9d0' });
+  // 缺 itemId / 非 ui:// → null（不猜）
+  assert.equal(parseUiRef('ui://mtlga5qj'), null);
+  assert.equal(parseUiRef('reward_icon'), null);
+  assert.equal(parseUiRef('ui://abc/'), null);
+});
+
+test('★ 配置分离: font 在 uiRefAttributes、不在 urlAttributes', () => {
+  assert.ok(DEFAULT_FGUI_CONFIG.uiRefAttributes.includes('font'),
+    'R-04 专用清单必须含 font（真实工程字体引用要校验）');
+  assert.ok(!DEFAULT_FGUI_CONFIG.urlAttributes.includes('font'),
+    'urlAttributes 绝不能含 font —— R-05/R-10 会把它当成引用图片去量宽高');
+  // 其余属性两份清单一致
+  for (const a of ['src', 'url', 'icon', 'defaultItem']) {
+    assert.ok(DEFAULT_FGUI_CONFIG.uiRefAttributes.includes(a), `uiRefAttributes 应含 ${a}`);
+    assert.ok(DEFAULT_FGUI_CONFIG.urlAttributes.includes(a), `urlAttributes 应含 ${a}`);
+  }
+});
+
+test('★ R-04: font 引用（拼接）合法 → 不报', () => {
+  const xml = [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<component size="480,320" exported="true">',
+    '  <font id="f00001" name="main_font" font="ui://mtlga5qj8yoa8k"/>',
+    '  <displayList>',
+    '    <graph id="b00001" name="bg" xy="0,0" size="480,320"/>',
+    '  </displayList>',
+    '</component>',
+    '',
+  ].join('\n');
+  assert.deepEqual(byRule(lintComponentXml(xml, { resources: RESOURCES }), 'R-04'), []);
+});
+
+test('★ R-04: font 引用包 id 位数错误 → 必报（证明 font 真的被纳入校验）', () => {
+  const xml = [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<component size="480,320" exported="true">',
+    '  <font id="f00001" name="main_font" font="ui://abc123/x"/>',
+    '  <displayList>',
+    '    <graph id="b00001" name="bg" xy="0,0" size="480,320"/>',
+    '  </displayList>',
+    '</component>',
+    '',
+  ].join('\n');
+  const issues = byRule(lintComponentXml(xml, { resources: RESOURCES }), 'R-04');
+  assert.equal(issues.length, 1, 'font 的 6 位包 id 必须被 R-04 抓到（改前 font 完全不校验）');
+  assert.ok(issues[0].message.includes('abc123'));
+});

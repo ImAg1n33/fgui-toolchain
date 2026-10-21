@@ -31,21 +31,28 @@ function parseUiRef(raw) {
   const rest = v.slice('ui://'.length);
   if (!rest) return null;
 
-  // 风格一：ui://<pkgId>/<itemId>（本项目生成侧与 lint R-04 的风格）
-  const slash = /^([^/]+)\/(.+)$/.exec(rest);
-  if (slash && slash[1].length === PKG_ID_LENGTH && slash[2].trim()) {
+  // ★ 斜杠优先（2026-10-21 修正）★
+  //   值里**含 `/` 就一律按 slash 拆**（pkgId = 第一个 `/` 之前、itemId = 之后），
+  //   绝不用「前 N 位」硬切。原实现在「pkgId 不是 8 位 + 含 `/`」时会先命中 concat
+  //   分支，把 `ui://abc123/x` 硬切成 `pkgId='abc123/p'`（长度恰好 8）——
+  //   把**6 位包 id 掩藏成"合法"**，而 R-04 的职责正是要报出这种位数错误。
+  const slashIdx = rest.indexOf('/');
+  if (slashIdx >= 0) {
+    const pkgId = rest.slice(0, slashIdx);
+    const itemId = rest.slice(slashIdx + 1);
+    if (!pkgId || !itemId) return null; // 缺包 id 或缺 itemId → 由上层报错，不猜
     return {
       raw: v,
       style: 'slash',
-      pkgId: slash[1],
-      itemId: slash[2],
+      pkgId,
+      itemId,
     };
   }
 
   // 风格二：ui://<pkgId><itemId>（上游 bridge / 编辑器的风格，无分隔符）
   if (rest.length > PKG_ID_LENGTH) {
     const itemId = rest.slice(PKG_ID_LENGTH);
-    if (itemId.trim() && itemId !== '/') {
+    if (itemId.trim()) {
       return {
         raw: v,
         style: 'concat',
@@ -55,16 +62,7 @@ function parseUiRef(raw) {
     }
   }
 
-  // 其他形态（如 pkgId 非 8 位 + 斜杠）：如实记录 pkgId 但 itemId 可能为空，
-  // 交由上层 warning —— R-04 会拦 8 位校验，indexer 不重复当法官。
-  if (slash) {
-    return {
-      raw: v,
-      style: 'slash',
-      pkgId: slash[1],
-      itemId: slash[2],
-    };
-  }
+  // 其余形态（无 `/` 且长度不足/无 itemId）：如实返回 null，由上层决定
   return null;
 }
 

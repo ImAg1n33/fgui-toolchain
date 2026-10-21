@@ -126,6 +126,15 @@ const DEFAULT_FGUI_CONFIG = Object.freeze({
   colorRequireAlpha: false,
   // R-04：承载 ui:// 引用的属性名清单
   urlAttributes: Object.freeze(['src', 'url', 'icon', 'defaultItem']),
+  // R-04：**需要做引用合法性校验**的属性名清单（含 `font`）。
+  //   ★ 与 urlAttributes 的区别（两者不可混用）★
+  //     · urlAttributes      = 「哪些属性指向一个**可测量尺寸的资源**」—— R-05（scale9grid
+  //                            边界对账）与 R-10（九宫格适用性）靠它找"这个元素引用的图"；
+  //     · uiRefAttributes    = 「哪些属性里的 ui:// 需要做**引用合法性校验**」—— 只有 R-04 用。
+  //   真实 FairyGUI 6.1.4 工程的字体引用是 `font="ui://mtlga5qj8yoa8k"`（拼接），
+  //   需要校验；但 `font` 若塞进 urlAttributes，会让 `<text font="ui://…">` 被 R-05/R-10
+  //   当成"引用了一张图"去量宽高 → 误报。故单独一份清单。
+  uiRefAttributes: Object.freeze(['src', 'url', 'icon', 'defaultItem', 'font']),
   // R-06：组件是否必须 exported="true"（上游事故：漏则发布静默丢包）
   exportedRequired: true,
   // R-09：单组件显示对象数告警阈值（上游 STANDARDS，可调）

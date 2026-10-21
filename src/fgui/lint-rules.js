@@ -184,6 +184,26 @@ function firstUiRef(node, cfg) {
   return null;
 }
 
+/**
+ * 按**指定属性清单**找第一个 ui:// 引用（R-04 专用）。
+ *
+ * 与 `firstUiRef` 的区别：后者用 `cfg.urlAttributes`（"指向可测量资源的属性"，
+ * R-05/R-10 依赖它去量图片宽高）；本函数用 `cfg.uiRefAttributes`（含 `font`），
+ * 只服务"引用合法性校验"。把 `font` 混进 urlAttributes 会让 R-05/R-10 把
+ * `<text font="ui://…">` 当成引用了一张图 → 误报，故两份清单分开。
+ *
+ * @param {Object} node
+ * @param {string[]} attrs
+ * @returns {{attr:string, value:string}|null}
+ */
+function firstUiRefByAttrs(node, attrs) {
+  for (const attr of attrs || []) {
+    const v = node.attrs[attr];
+    if (typeof v === 'string' && /^ui:\/\//i.test(v)) return { attr, value: v };
+  }
+  return null;
+}
+
 // ---- R-00：XML 结构合法 ----
 function checkStructure(ctx) {
   const issues = [];
@@ -343,50 +363,33 @@ function checkUiRefs(ctx) {
   const issues = [];
   const want = ctx.cfg.pkgIdLength;
   walkElements(ctx.parsed.root, (node) => {
-    const ref = firstUiRef(node, ctx.cfg);
+    // R-04 用**专用清单**（含 font）；未配置时退回 urlAttributes（旧配置兼容）
+    const ref = firstUiRefByAttrs(node, ctx.cfg.uiRefAttributes || ctx.cfg.urlAttributes);
     if (!ref) return;
     const at = node.attrPos[ref.attr] || { line: node.line, col: node.col };
     const parsed = parseUiRef(ref.value);
-    // 斜杠形态优先：以第一个 '/' 为界拆分。
-    // ★ 为什么不直接信 parseUiRef 的 style ★：`ui://abc123/popup_bg`（6 位包 id + 斜杠）
-    //   会被 parseUiRef 的 concat 分支按「前 8 位」硬切成 pkgId='abc123/p'、itemId='opup_bg'
-    //   —— 长度恰好 8，于是**把要报的 6 位包 id 掩藏成"合法"**。而 R-04 的职责正是报出
-    //   位数错误，故含 '/' 时按 '/' 拆分（这样 6 位也能被抓到）。
-    //   concat（无 '/'）才用 parseUiRef 的拆分结果。
-    const body = String(ref.value).trim().replace(/^ui:\/\//i, '');
-    const slashIdx = body.indexOf('/');
-    /** @type {string|null} */
-    let pkgId = null;
-    /** @type {string|null} */
-    let itemId = null;
-    if (slashIdx >= 0) {
-      pkgId = body.slice(0, slashIdx);
-      itemId = body.slice(slashIdx + 1);
-    } else if (parsed) {
-      pkgId = parsed.pkgId;
-      itemId = parsed.itemId;
-    }
-    if (!pkgId) {
+    if (!parsed) {
       issues.push({
         severity: 'error',
         message: `${ref.attr}="${ref.value}" 不是合法 ui:// 引用：期望 `
         + `ui://<包id>/<资源名>（斜杠）或 ui://<包id><资源名>（拼接，上游编辑器风格）。`
-        + `位置：${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
+        + `修复方向：补全包 id 与资源名。位置：${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
         line: at.line, col: at.col, node, target: ref.value,
       });
       return;
     }
-    if (pkgId.length !== want) {
+    // parseUiRef 现在「含 '/' 一律按 slash 拆」，故 pkgId 位数错误不再被掩藏
+    if (parsed.pkgId.length !== want) {
       issues.push({
         severity: 'error',
-        message: `${ref.attr}="${ref.value}" 的包 id '${pkgId}' 是 ${pkgId.length} 位，`
+        message: `${ref.attr}="${ref.value}" 的包 id '${parsed.pkgId}' 是 ${parsed.pkgId.length} 位，`
           + `应为 ${want} 位。上游事故：6 位包 id 会吃掉 itemId 首字符，导致 27 张图 + 组件`
           + '静默丢失（发布成功但内容缺）。修复方向：把包 id 补齐/改为 package.xml 里的 8 位 id。位置：'
           + `${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
-        line: at.line, col: at.col, node, target: pkgId,
+        line: at.line, col: at.col, node, target: parsed.pkgId,
       });
     }
-    if (!itemId) {
+    if (!parsed.itemId) {
       issues.push({
         severity: 'error',
         message: `${ref.attr}="${ref.value}" 缺少 itemId：ui:// 引用必须同时给出资源标识`
