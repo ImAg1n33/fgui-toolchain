@@ -17,7 +17,7 @@ const assert = require('node:assert/strict');
 const {
   buildCreatePlan, parseCanvas, sanitizeName, pickPageName,
   coversCanvas, detectBackgroundLayerId, collectLeavesBottomToTop,
-  detectVerticalStacks, detectOverlapping, DEFAULT_CANVAS,
+  detectVerticalStacks, detectOverlapping, computeReadiness, DEFAULT_CANVAS,
 } = require('../../src/create/plan-builder');
 const { renderPlanMarkdown } = require('../../src/create/plan-markdown');
 const { AppError } = require('../../src/core/errors');
@@ -381,6 +381,67 @@ test('controller 建议: 完全重叠的节点 ≥2 → deferred.controllers', (
 test('deferred.relations: 恒有「绝对定位需人工加 Relations」建议', () => {
   const plan = build();
   assert.ok(plan.deferred.relations.some((d) => /Relations/.test(d.reason)));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// v0.3-C：readiness（把「计划生成成功」与「可以构建」分开）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ readiness: 全干净 → ready（通用 Relations 建议带 advisory，不计入 blocker）', () => {
+  const r = computeReadiness({
+    unresolved: [],
+    toImport: [],
+    deferred: { controllers: [], relations: [{ advisory: true, suggestion: '适配归组' }], listItems: [] },
+  });
+  assert.equal(r.status, 'ready');
+  assert.deepEqual(r.blockers, []);
+});
+
+test('★ readiness: 有 toImport → needs-human + blockers(kind=toImport, count)', () => {
+  const r = computeReadiness({
+    unresolved: [],
+    toImport: [{ layerId: 'L1' }, { layerId: 'L2' }],
+    deferred: { controllers: [], relations: [{ advisory: true }], listItems: [] },
+  });
+  assert.equal(r.status, 'needs-human');
+  assert.deepEqual(r.blockers, [{ kind: 'toImport', count: 2 }]);
+});
+
+test('★ readiness: 有需处理的 deferred → needs-human（advisory 之外）', () => {
+  const r = computeReadiness({
+    unresolved: [],
+    toImport: [],
+    deferred: {
+      controllers: [{ suggestion: 'ctrl' }],
+      relations: [{ advisory: true }, { suggestion: 'PSD 分组未映射' }],
+      listItems: [],
+    },
+  });
+  assert.equal(r.status, 'needs-human');
+  assert.deepEqual(r.blockers, [{ kind: 'deferred', count: 2 }], '控制器 1 + 非 advisory 关系 1');
+});
+
+test('★ readiness: 有 unresolved → **blocked**（优先级最高），blockers 列出全部非空类别', () => {
+  const r = computeReadiness({
+    unresolved: [{ layerId: 'L2', reason: 'non-uniform-scale' }],
+    toImport: [{ layerId: 'L4' }],
+    deferred: { controllers: [], relations: [{ advisory: true }], listItems: [{ suggestion: 'Comp/AItem' }] },
+  });
+  assert.equal(r.status, 'blocked');
+  assert.deepEqual(r.blockers, [
+    { kind: 'unresolved', count: 1 },
+    { kind: 'toImport', count: 1 },
+    { kind: 'deferred', count: 1 },
+  ]);
+});
+
+test('readiness 已写入 create_plan；且与 toImport/unresolved 计数一致', () => {
+  const plan = build();
+  assert.ok(plan.readiness, '必须有 readiness');
+  assert.equal(plan.readiness.status, 'blocked', '本 fixture 有图标 non-uniform-scale');
+  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'unresolved'));
+  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'toImport'));
+  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'deferred'));
 });
 
 // ════════════════════════════════════════════════════════════════════════════

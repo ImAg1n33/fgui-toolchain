@@ -4,7 +4,10 @@
  *
  * usage:
  *   fgui-rb create-plan --ir <design_ir.json> --index <project_index.json> --out <dir>
- *                       [--canvas 750x1334] [--page-name X] [--pkg X]
+ *                       [--canvas 750x1334] [--page-name X] [--pkg X] [--strict]
+ *
+ * `--strict`：readiness.status !== 'ready' 时以退出码 4（NEEDS_HUMAN）退出，
+ *             方便 CI / Agent 判断「能不能进 Executor」。默认仍退 0（计划确实生成了）。
  *
  * ★ 这是 CREATE 模式，不是 PATCH ★
  *   只吃 **Design IR + 工程索引**；**不接受也不需要** change_plan.json / gen_plan.json /
@@ -21,7 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const { readJson, writeJson, ensureDir } = require('../core/fs-json');
 const { flagStr } = require('./args');
-const { AppError, CODES } = require('../core/errors');
+const { AppError, CODES, EXIT } = require('../core/errors');
 const { buildCreatePlan, parseCanvas } = require('../create/plan-builder');
 const { renderPlanMarkdown } = require('../create/plan-markdown');
 
@@ -92,6 +95,11 @@ async function run(ctx) {
         count: plan.assets.toImport.length,
       });
     }
+    if (plan.readiness.status !== 'ready') {
+      logger.warn(`就绪度 ${plan.readiness.status} —— 不要直接进入构建，请先处理 blockers`, {
+        blockers: plan.readiness.blockers,
+      });
+    }
   }
 
   // stdout 只输出摘要 + 产物路径（纯 JSON，便于管道）
@@ -105,6 +113,8 @@ async function run(ctx) {
     page: plan.page,
     canvas: plan.canvas,
     summary: plan.summary,
+    // ★ 就绪度：ok:true 只代表「计划生成了」，不代表「可以构建」★
+    readiness: plan.readiness,
     // 让人一眼看到「哪些需要人工」——但完整清单在 md/json 里
     needsHuman: {
       toImport: plan.assets.toImport.length,
@@ -114,6 +124,15 @@ async function run(ctx) {
     },
   }, null, 2)}\n`);
 
+  // ★ --strict：非 ready 时退 4（NEEDS_HUMAN），供 CI / Agent 判断能否进 Executor ★
+  //   默认仍退 0 —— 计划确实生成了，产物可看。
+  const strict = ctx.bool(flags.strict, false);
+  if (strict && plan.readiness.status !== 'ready') {
+    if (logger) {
+      logger.warn(`--strict：readiness=${plan.readiness.status}，以退出码 ${EXIT.NEEDS_HUMAN} 结束`);
+    }
+    return EXIT.NEEDS_HUMAN;
+  }
   return 0;
 }
 

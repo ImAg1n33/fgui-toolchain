@@ -29,6 +29,18 @@ function renderPlanMarkdown(plan) {
     : '';
   push(`> **画布：${cv.w}×${cv.h}（${srcText}）**${mismatch}`);
   push('');
+  // ★ 就绪度一行（外部审查：别把「计划生成成功」当成「可以构建」）★
+  const rd = p.readiness || { status: '(未知)', blockers: [] };
+  const rdText = {
+    ready: '✅ ready —— 无待人工项，可交给 Executor',
+    'needs-human': '⚠️ needs-human —— 需人工处理下列事项后才能构建',
+    blocked: '⛔ blocked —— 存在结构性未决项，**不可**构建',
+  }[rd.status] || rd.status;
+  const blockerText = (rd.blockers || []).length
+    ? `（${rd.blockers.map((b) => `${b.kind}=${b.count}`).join('，')}）`
+    : '';
+  push(`> **就绪度：${rdText}${blockerText}**`);
+  push('');
   push(`- 模式：**CREATE**（只由 Design IR + 工程索引生成，不依赖任何已存在的组件 XML）`);
   push(`- 目标包：\`${(p.page && p.page.pkg) || '(未指定)'}\``);
   push(`- 节点数：${s.nodes}（复用资源 ${s.reused}，待导入 ${s.toImport}，未决 ${s.unresolved}）`);

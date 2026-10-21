@@ -495,6 +495,8 @@ function buildCreatePlan(args = {}) {
   }
   deferred.relations.push({
     suggestion: '适配归组',
+    // ★ advisory：对每一页都成立的通用建议，不计入 readiness 的 blocker ★
+    advisory: true,
     reason: '全页绝对定位（xy/size 取 IR bbox，未做缩放换算）—— 需要屏幕适配时请人工加 Relations'
       + '（左右/上下居中 + 拉伸），v1 不自动生成',
   });
@@ -546,6 +548,8 @@ function buildCreatePlan(args = {}) {
       deferred: deferred.controllers.length + deferred.relations.length + deferred.listItems.length,
       unresolved: unresolved.length,
     },
+    // ★ 就绪度：把「计划生成成功」与「可以构建」分开（v0.3-C）★
+    readiness: computeReadiness({ unresolved, toImport, deferred }),
   };
 
   return plan;
@@ -636,10 +640,63 @@ function ensureUniqueNames(nodes) {
   }
 }
 
+/** 资源匹配「就绪度」状态（v0.3-C）。 */
+const READINESS = Object.freeze({
+  READY: 'ready',             // 无任何待人工项 → 可交给 Executor
+  NEEDS_HUMAN: 'needs-human', // 有待导入素材或需处理的 deferred → 人先确认
+  BLOCKED: 'blocked',         // 有 unresolved（结构性未决）→ 不能构建
+});
+
+/**
+ * 计算 readiness（外部审查要求：别让「计划生成了」被当成「可以构建了」）。
+ *
+ * ★ 为什么必须有它 ★
+ *   `ok: true` 只表示**规划文件生成成功**；即使有大量 toImport / unresolved /
+ *   deferred，命令照样成功退出。未来的 Executor 若把 ok 当成「整页 UI 可成功生成」，
+ *   就会在缺素材/结构未决的页面上强行构建 —— 这是灾难性误判。
+ *
+ * 判定优先级（lead 定）：unresolved → blocked；否则 toImport 或任何**需处理的**
+ * deferred → needs-human；全空 → ready。
+ *
+ * ★ 关于 `advisory` ★
+ *   `deferred.relations` 里有一条「绝对定位 → 请人工加 Relations」是**对每一页都
+ *   成立的通用建议**，不是检测到的问题。若把它也计入 blocker，则任何页面永远不可能
+ *   ready（`--strict` 恒为 4，失去意义）。故这类条目带 `advisory: true`，**不计入
+ *   blocker**，但仍保留在 plan 与 md 里可见 —— 既不为难 CI，也不隐藏事实。
+ *
+ * @param {Object} a
+ * @param {Object[]} [a.unresolved]
+ * @param {Object[]} [a.toImport]
+ * @param {Object} [a.deferred]
+ * @returns {{status:string, blockers:{kind:string,count:number}[]}}
+ */
+function computeReadiness(a = {}) {
+  const unresolved = Array.isArray(a.unresolved) ? a.unresolved : [];
+  const toImport = Array.isArray(a.toImport) ? a.toImport : [];
+  const d = a.deferred && typeof a.deferred === 'object' ? a.deferred : {};
+  const actionableDeferred = [
+    ...(Array.isArray(d.controllers) ? d.controllers : []),
+    ...(Array.isArray(d.listItems) ? d.listItems : []),
+    ...(Array.isArray(d.relations) ? d.relations : []).filter((r) => !(r && r.advisory === true)),
+  ];
+
+  const blockers = [];
+  if (unresolved.length) blockers.push({ kind: 'unresolved', count: unresolved.length });
+  if (toImport.length) blockers.push({ kind: 'toImport', count: toImport.length });
+  if (actionableDeferred.length) blockers.push({ kind: 'deferred', count: actionableDeferred.length });
+
+  const status = unresolved.length
+    ? READINESS.BLOCKED
+    : (blockers.length ? READINESS.NEEDS_HUMAN : READINESS.READY);
+  return { status, blockers };
+}
+
 module.exports = {
   buildCreatePlan,
   parseCanvas,
   resolveCanvas,
+  computeReadiness,
+  READINESS,
   sanitizeName,
   sanitizeComponentName,
   pickPageName,

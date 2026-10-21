@@ -346,6 +346,109 @@ test('⑧ create_plan.md 含「待人工确认」清单（toImport / unresolved 
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// v0.3-C readiness + --strict
+// ════════════════════════════════════════════════════════════════════════════
+
+/** 干净计划的 fixture：资源全命中、无未决、无列表/重叠 → readiness=ready。 */
+function setupClean(label) {
+  fs.mkdirSync(TMP_BASE, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(TMP_BASE, `${label}-`));
+  const irPath = path.join(dir, 'design_ir.json');
+  const idxPath = path.join(dir, 'project_index.json');
+  const ir = {
+    version: '1.0',
+    source: { psdPath: 'psd/clean.psd', canvas: { w: 750, h: 1334 } },
+    layers: [
+      // 顶→底：一个图标（尺寸与固有完全一致）+ 背景（有登记资源）
+      { id: 'L001', name: '徽章', normName: '徽章', type: 'raster', bbox: { x: 100, y: 100, w: 48, h: 48 }, opacity: 1, visible: true },
+      { id: 'L002', name: '背景', normName: '背景', type: 'raster', bbox: { x: 0, y: 0, w: 750, h: 1334 }, opacity: 1, visible: true },
+    ],
+    slices: [], sliceNames: [],
+  };
+  const idx = {
+    version: '1.0',
+    project: { name: 'P', packages: [{ name: 'Mail', id: 'm' }] },
+    resources: [
+      { pkg: 'Mail', pkgId: 'm', type: 'image', id: 'q0badge', name: '徽章.png', exported: 'true', width: 48, height: 48 },
+      { pkg: 'Mail', pkgId: 'm', type: 'image', id: 'q0bg', name: '背景.png', exported: 'true', width: 750, height: 1334 },
+    ],
+    components: [],
+  };
+  fs.writeFileSync(irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(idxPath, `${JSON.stringify(idx, null, 2)}\n`, 'utf8');
+  return { dir, irPath, idxPath, out: path.join(dir, 'out') };
+}
+
+test('★ readiness①: 干净计划 → ready；默认退 0；--strict 也退 0', () => {
+  const f = setupClean('rd-ready');
+  const r = runCreatePlan(f);
+  assert.equal(r.code, 0);
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.equal(plan.readiness.status, 'ready', `blockers=${JSON.stringify(plan.readiness.blockers)}`);
+  assert.deepEqual(plan.readiness.blockers, []);
+  assert.equal(r.json.readiness.status, 'ready');
+
+  const strict = runCreatePlan(f, ['--strict']);
+  assert.equal(strict.code, 0, '★ ready 时 --strict 也必须退 0');
+});
+
+test('★ readiness②: 有 toImport 但无 unresolved → needs-human；默认 0；--strict 退 4', () => {
+  // 在「干净」fixture 上加一张未登记资源的图 → 只有 toImport，没有 unresolved
+  const f = setupClean('rd-import');
+  const ir = JSON.parse(fs.readFileSync(f.irPath, 'utf8'));
+  ir.layers.unshift({
+    id: 'L003', name: '未登记图', normName: '未登记图', type: 'raster',
+    bbox: { x: 300, y: 600, w: 120, h: 48 }, opacity: 1, visible: true,
+  });
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+
+  const r = runCreatePlan(f);
+  assert.equal(r.code, 0, '默认仍退 0（计划确实生成了）');
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.equal(plan.readiness.status, 'needs-human',
+    `unresolved 应为 0，实际 blockers=${JSON.stringify(plan.readiness.blockers)}`);
+  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'toImport' && b.count > 0));
+  assert.ok(!plan.readiness.blockers.some((b) => b.kind === 'unresolved'));
+
+  const strict = runCreatePlan(f, ['--strict']);
+  assert.equal(strict.code, 4, `★ --strict 非 ready 应退 4，实际 ${strict.code}`);
+});
+
+test('★ readiness③: 有 unresolved → blocked；--strict 退 4', () => {
+  const f = setup('rd-blocked'); // 默认 fixture：图标 48x48 vs 固有 96x96 → non-uniform-scale
+  const r = runCreatePlan(f);
+  assert.equal(r.code, 0);
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.equal(plan.readiness.status, 'blocked');
+  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'unresolved'));
+
+  const strict = runCreatePlan(f, ['--strict']);
+  assert.equal(strict.code, 4);
+});
+
+test('★ readiness④: blockers 的 kind/count 与实际计数一致', () => {
+  const f = setup('rd-counts');
+  assert.equal(runCreatePlan(f).code, 0);
+  const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  const byKind = Object.fromEntries(plan.readiness.blockers.map((b) => [b.kind, b.count]));
+
+  assert.equal(byKind.unresolved, plan.unresolved.length);
+  assert.equal(byKind.toImport, plan.assets.toImport.length);
+  // deferred 只数「需处理的」：controllers + listItems + 非 advisory 的 relations
+  const actionable = plan.deferred.controllers.length
+    + plan.deferred.listItems.length
+    + plan.deferred.relations.filter((r) => r.advisory !== true).length;
+  assert.equal(byKind.deferred, actionable);
+  // 通用 Relations 建议必须带 advisory（否则 ready 永远不可能出现）
+  assert.ok(plan.deferred.relations.some((r) => r.advisory === true));
+
+  // md 顶部要有就绪度一行
+  const md = fs.readFileSync(path.join(f.out, 'create_plan.md'), 'utf8');
+  assert.ok(/就绪度/.test(md), 'md 顶部应说明就绪度');
+  assert.ok(/blocked/.test(md));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // 参数防御
 // ════════════════════════════════════════════════════════════════════════════
 
