@@ -32,6 +32,7 @@ const COMMANDS = Object.freeze({
   selftest: { module: './cmd-selftest', desc: '一键自检（合成黄金样本跑通全链路）' },
   'gen-xml': { module: './cmd-gen-xml', desc: 'M2：gen-xml 增量构建（prepare→dryrun→apply；定点补丁 + lint 门禁 + 事务写盘）' },
   'project-index': { module: './cmd-project-index', desc: 'M1：FGUI 工程只读索引（package.xml + 组件 XML -> project_index.json）' },
+  'create-plan': { module: './cmd-create-plan', desc: 'v0.3-B：CREATE 模式（Design IR + 工程索引 -> create_plan.json/md；不依赖已有组件 XML）' },
 });
 
 /**
