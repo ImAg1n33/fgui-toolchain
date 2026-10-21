@@ -108,6 +108,7 @@ PSD ×N ────► R2 PSD 解析器 ──► design_ir.{A,B}.json + ir_ove
 | `diff-plan` | 两份 IR 的四级匹配 + 七类差异分类 | `change_plan.json` `change_plan.md` |
 | `project-index` | **只读**解析存量 FGUI 工程（包/组件/资源/引用图/复用） | `project_index.json` |
 | `gen-xml` | 生成侧三阶段：`prepare`（出编辑脚本）→ `dryrun`（零写入预演）→ `apply`（事务写盘） | `gen_plan.json` `dryrun_report.{json,md}` `apply_report.{json,md}` |
+| `create-plan` | **CREATE 模式**：单份 Design IR + 工程索引 → 新界面构建计划（**不需要旧 PSD，也不需要已存在的目标组件 XML**） | `create_plan.json` `create_plan.md` |
 | `selftest` | 一键跑通全链路 | 全套 |
 
 ### 退出码（脚本可据此判断能否进下一步）
@@ -339,8 +340,12 @@ D:\UItool\
 - **M1**：只读 FGUI Project Indexer（`project-index`）
 - **M2**：`gen-xml` 生成侧三阶段增量构建（prepare → dryrun → apply），含人工确认门禁、SHA-256 防漂移、lint 写盘门禁、`.bak` 备份与失败回滚
 - **v0.3-A 真实工程校准**：依据朋友授权的 FairyGUI 6.1.4 真实工程，修正资源引用形态（短 ID / 拼接 `ui://`）与 `exported` 判定（按引用场景），并补齐 lint：R-04 接受两种 `ui://` 风格、R-11 短 ID 登记性校验（**按目标包作用域**，不跨包误判）
+- **v0.3-B CREATE 模式（规划）**：`create-plan` 命令 —— 单份 Design IR + 工程索引 → `create_plan.json`/`.md`。**不需要旧 PSD，也不需要已存在的目标组件 XML**。编码了公司制作规范（画布跟随 IR、`Page/Comp/Texture` 命名、`img_/txt_/btn_/list_` 前缀、背景强制最底、图标/立绘等比缩放不放大且在 bbox 内居中、未匹配素材进 `toImport`）
+- **v0.3-C CREATE 门禁**：`readiness`（`ready`/`needs-human`/`blocked`）+ `--strict`（非 ready 退 4）—— **"计划生成了"≠"可以构建了"**；画布来源与不一致（`source`/`mismatch`）、目标包存在性、素材缩放严重度都纳入判定
 
-全部产物确定性（同输入逐字节一致），`npm test` **544 项全绿**，CI 在 Windows + Linux 双平台通过。
+**任务模式**：`gen-xml` 是 **PATCH**（改已有界面）；`create-plan` 是 **CREATE**（从零建新界面）。两者共用 PSD 解析、素材索引、工程索引与 lint。
+
+全部产物确定性（同输入逐字节一致），`npm test` **600 项全绿**，CI 在 Windows + Linux 双平台通过。
 
 **生成侧的安全约束**（`gen_plan.json` 被定位为"人可编辑"，因此其中一切路径都视为**不可信输入**）：
 - 目标路径必须**位于工程根之内**（路径段比较，非字符串前缀），`fs.realpath` 解析符号链接后仍须在根内，且**必须是工程索引中登记的组件 XML** —— 拒绝 `../` 逃逸 / 绝对路径 / 带盘符 / 软链跳出 / 未登记文件；
