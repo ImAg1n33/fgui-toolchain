@@ -81,45 +81,111 @@ function collectTargets(genPlan) {
 }
 
 /**
- * 从 project_index 构造 lint 注入用的资源表（D9）。
+ * lint 注入用的资源表。
  *
- * 对每条资源同时给出两个 key：`ui://<pkgId>/<id>`（优先）与 `ui://<pkgId>/<name>`；
- * 再补裸 `id` / 裸 `name`（覆盖 lint 的 lookupResource「退化为末段名」路径）。
+ * ★ 为什么不是一个普通 Map（P0：R-11 跨包误判的根因）★
+ *   旧实现把所有包的 `id` / `name` 平铺进同一个键空间：
+ *     `map[id] = entry; map[name] = entry;`
+ *   于是 R-11 用短 ID 查表时，命中的可能是**别的包**的资源，也可能是**某条资源的 name**
+ *   （id 与 name 共用命名空间，后写覆盖先写）→ 把「未登记」误判为「已登记」，
+ *   或把别包的 component 当成「指向的不是图片」。
  *
- * ★ 不再因为 width/height 为 null 就整条跳过（决策 3）★
+ * 现在的结构：
+ *   · `byUrl`        —— 全包：`ui://<pkgId>/<id>` 与 `ui://<pkgId>/<name>`
+ *                       （供跨包 `ui://` 校验与 R-05/R-10 的精确查找）；
+ *   · `localById` /
+ *     `localByName`  —— **仅目标包**（供短 ID 查找，绝不回退到别的包）。
+ *
+ * 对外保持 `get/has/size` 语义，兼容 lint 的 `lookupResource`（先精确、再退化末段名）。
+ */
+class LintResourceTable {
+  constructor() {
+    this.byUrl = new Map();
+    this.localById = new Map();
+    this.localByName = new Map();
+    /** 带有限 w/h 的条目数（供 D9 的「没有任何可测量资源」判定）。 */
+    this.measuredCount = 0;
+    this.__isLintResourceTable = true;
+  }
+
+  /** 条目总数（byUrl + 两张本地表；只用于「非空」判断）。 */
+  get size() {
+    return this.byUrl.size + this.localById.size + this.localByName.size;
+  }
+
+  /**
+   * @param {string} key
+   * @returns {boolean}
+   */
+  has(key) {
+    return this.get(key) !== undefined;
+  }
+
+  /**
+   * ★ 分派规则（P0 修复的核心）★
+   *   · 含 `://` → **只查 byUrl**（跨包 ui:// 精确查找）；
+   *   · 否则     → **只查目标包**：先 localById、再 localByName（绝不回退到别的包）。
+   * @param {string} key
+   * @returns {Object|undefined}
+   */
+  get(key) {
+    if (typeof key !== 'string' || !key) return undefined;
+    if (key.includes('://')) return this.byUrl.get(key);
+    return this.localById.get(key) || this.localByName.get(key);
+  }
+}
+
+/**
+ * 从 project_index 构造 lint 注入用的资源表（D9 / P0 作用域修复）。
+ *
+ * ★ 不再因为 width/height 为 null 就整条跳过 ★
  *   component 资源天然没有尺寸，但它是**合法登记**：R-11 需要据此判
  *   「这个短 ID 指向的是 component 而不是图片」。缺尺寸的条目只带 `type`，
  *   R-05/R-10 会因为 `!Number.isFinite(info.w)` / `!info.features` 按既有逻辑
  *   计入 sizeUnknown / noFeatures（有 notes，非静默）。
  *
  * @param {Object} projectIndex
- * @returns {Object<string,{w?:number,h?:number,type?:string}>}
+ * @param {Object} [opts]
+ * @param {string} [opts.targetPkg] 目标包**名**（gen_plan.target.pkg）
+ * @param {string} [opts.targetPkgId] 目标包 id（兜底：pkg 名缺失时用）
+ * @returns {LintResourceTable}
  */
-function buildLintResources(projectIndex) {
-  const map = {};
+function buildLintResources(projectIndex, opts = {}) {
+  const table = new LintResourceTable();
+  const targetPkg = typeof opts.targetPkg === 'string' && opts.targetPkg ? opts.targetPkg : null;
+  const targetPkgId = typeof opts.targetPkgId === 'string' && opts.targetPkgId ? opts.targetPkgId : null;
   const list = (projectIndex && Array.isArray(projectIndex.resources)) ? projectIndex.resources : [];
   for (const r of list) {
     if (!r) continue;
     const w = numOrNull(r.width);
     const h = numOrNull(r.height);
+    const hasDims = w !== null && h !== null;
     const pkgId = r.pkgId || r.packageId || null;
     const id = r.id || null;
     const name = r.name || null;
-    // ★ 必须带上 type（决策 3）★：R-11 要判「短 ID 命中的是不是图片资源」。
+    // ★ 必须带上 type（R-11 要判「短 ID 命中的是不是图片资源」）★：
     //   只给 {w,h} 时那条检查在生产路径上是装饰性的（单测能测、真跑不生效）。
-    //   ★ 但**不能整体跳过没有尺寸的条目**（component 没有 width/height）★：
-    //   否则 R-11 会说「未登记」而不是「引用的不是图片」。故：
-    //     · 有尺寸 → { w, h, type }；R-05/R-10 照旧可用；
-    //     · 无尺寸 → { type }（仍是一次合法的"登记"）；R-05/R-10 会因缺 w/h
-    //       而按既有逻辑计入 sizeUnknown / noFeatures（有 notes，非静默）。
-    const entry = { type: r.type };
-    if (w !== null && h !== null) { entry.w = w; entry.h = h; }
-    if (pkgId && id) map[`ui://${pkgId}/${id}`] = entry;
-    if (pkgId && name) map[`ui://${pkgId}/${name}`] = entry;
-    if (id) map[id] = entry;
-    if (name) map[name] = entry;
+    const entry = {
+      type: r.type, pkg: r.pkg === undefined ? null : r.pkg, id, name,
+    };
+    if (hasDims) {
+      entry.w = w;
+      entry.h = h;
+      table.measuredCount += 1;
+    }
+    // 全量表：只放 ui:// 全串（跨包精确查找；R-05/R-10 用）
+    if (pkgId && id) table.byUrl.set(`ui://${pkgId}/${id}`, entry);
+    if (pkgId && name) table.byUrl.set(`ui://${pkgId}/${name}`, entry);
+    // 本地表：**仅目标包**（短 ID 查找）
+    const isTarget = targetPkg !== null
+      ? r.pkg === targetPkg
+      : (targetPkgId !== null && pkgId === targetPkgId);
+    if (isTarget) {
+      if (id) table.localById.set(id, entry);
+      if (name) table.localByName.set(name, entry);
+    }
   }
-  return map;
+  return table;
 }
 
 /**
@@ -368,7 +434,14 @@ function runDryrun(input = {}) {
 
   const entries = Array.isArray(genPlan.entries) ? genPlan.entries : [];
   const targets = collectTargets(genPlan);
-  const lintResources = buildLintResources(projectIndex);
+  const lintResources = buildLintResources(projectIndex, {
+    targetPkg: genPlan.target && genPlan.target.pkg,
+    targetPkgId: genPlan.target && genPlan.target.pkgId,
+  });
+  /** project_index 的包清单（R-04 的「包 id 是否存在」warning 用；空数组 = 不判断） */
+  const projectPackages = (projectIndex && projectIndex.project && Array.isArray(projectIndex.project.packages))
+    ? projectIndex.project.packages
+    : [];
 
   /** @type {string[]} */
   const topErrors = [];
@@ -378,10 +451,9 @@ function runDryrun(input = {}) {
   /** @type {Object[]} 顶层非致命告警（如 lint 资源注入表为空 —— D9 防静默降级） */
   const reportWarnings = [];
   /** resources 注入表是否"没有可测量的资源"（D9）：
-   *  空表，或虽有登记但没有任何条目带可用宽高（典型成因：project-index 带 --no-images）—— 
-   *  后者仍会让 R-05/R-10 降级，故必须照样告警。 */
-  const resourcesEmpty = Object.keys(lintResources).length === 0
-    || !Object.values(lintResources).some((v) => v && Number.isFinite(v.w) && Number.isFinite(v.h));
+   *  空表，或虽有登记但没有任何条目带可用宽高（典型成因：project-index 带 --no-images）——
+   *  后者仍会让 R-05/R-10 降级，故必须照样告警。用表自带的 measuredCount 计量。 */
+  const resourcesEmpty = !lintResources || lintResources.measuredCount === 0;
   /** @type {Object[]} */
   const files = [];
   let entriesApplied = 0;
@@ -520,6 +592,7 @@ function runDryrun(input = {}) {
       config: options.config,
       fileName: t.file,
       resources: lintResources,
+      packages: projectPackages,
     });
     const errs = (lint.errors || []).map((e) => ({ rule: e.rule, message: e.message, line: e.line }));
     if (errs.length) lintBlocked = true;

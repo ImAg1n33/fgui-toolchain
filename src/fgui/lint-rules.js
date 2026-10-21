@@ -96,6 +96,13 @@ function resolveLintConfig(config) {
  * @returns {Map<string, {w:number,h:number,features?:Object}>}
  */
 function normalizeResources(resources) {
+  // ★ 已是「资源表对象」（如 gen-dryrun 的 LintResourceTable：带 get/has 分派逻辑）★
+  //   必须**原样返回**，否则会被 Object.entries 拆成 byUrl/localById 之类的属性，破坏其语义。
+  if (!(resources instanceof Map)
+      && resources && typeof resources === 'object'
+      && typeof resources.get === 'function' && typeof resources.has === 'function') {
+    return resources;
+  }
   const map = new Map();
   if (resources instanceof Map) {
     for (const [k, v] of resources) map.set(k, v);
@@ -398,6 +405,23 @@ function checkUiRefs(ctx) {
         line: at.line, col: at.col, node, target: ref.value,
       });
     }
+    // ★ P1：包 id **存在性**（不只是位数）★
+    //   拼接形态尤其容易错配（8 位 + 合法长度 ≠ 存在的包）。索引里有包清单时才判断，
+    //   且默认只 **warning** —— 索引不完整（只扫了部分包）时不该把合法引用判成 error。
+    const pkgs = ctx.packages || [];
+    if (pkgs.length) {
+      const known = pkgs.some((p) => p && (String(p.id) === parsed.pkgId || String(p.name) === parsed.pkgId));
+      if (!known) {
+        issues.push({
+          severity: 'warning',
+          message: `${ref.attr}="${ref.value}" 的包 id '${parsed.pkgId}' 不在本次工程索引的包清单里`
+            + `（已知包：${pkgs.map((p) => (p.id || p.name)).join(', ')}）—— 可能是跨工程引用、`
+            + '索引不完整，或包 id 错配。修复方向：核对 package.xml 的包 id 或重跑 project-index。位置：'
+            + `${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
+          line: at.line, col: at.col, node, target: parsed.pkgId,
+        });
+      }
+    }
   });
   return issues;
 }
@@ -418,8 +442,15 @@ function checkUiRefs(ctx) {
 function checkShortSrcRefs(ctx) {
   const issues = [];
   const resMap = ctx.resources;
-  // 未注入资源信息 → 跳过（不产生噪声；空表告警由 gen-dryrun 的 LINT_RESOURCES_EMPTY 负责）
-  if (!resMap || typeof resMap.get !== 'function' || resMap.size === 0) return issues;
+  if (!resMap || typeof resMap.get !== 'function') return issues;
+  // ★ P0：只有**目标包**有资源信息时才具备判断能力 ★
+  //   别的包有资源不能构成"能判断这个短 ID" —— 否则跨包同名会误判（曾把 Common 的
+  //   component 当成 Mail 里的引用目标）。表对象用 localById 计量；普通 Map 退回 size。
+  const localSize = (resMap.localById && typeof resMap.localById.size === 'number')
+    ? resMap.localById.size
+    : resMap.size;
+  // 未注入/目标包无资源信息 → 跳过（不产生噪声；空表告警由 gen-dryrun 的 LINT_RESOURCES_EMPTY 负责）
+  if (localSize === 0) return issues;
 
   walkElements(ctx.parsed.root, (node) => {
     if (node.tag !== 'image') return;
@@ -430,7 +461,13 @@ function checkShortSrcRefs(ctx) {
     if (val.includes('://')) return; // ui:// 形态 → R-04 负责
 
     const at = node.attrPos.src || { line: node.line, col: node.col };
-    const hit = resMap.get(val) || null;
+    // ★ src 的短 ID 是**资源 id**，不是 name ★
+    //   表对象（gen-dryrun 的 LintResourceTable）里有 localById → 只按 id 查。
+    //   若回退到 name（get() 的二级查找），撞键场景（本包存在 **name** 相同的资源）
+    //   会静默放行，而那恰恰是「引用了一个不存在的 id」的典型误判。
+    //   普通 Map（调用方手工注入 {id: {...}}）没有分离信息，退回 get()。
+    const idTable = resMap.localById || resMap;
+    const hit = idTable.get(val) || null;
     if (!hit) {
       issues.push({
         severity: 'error',
@@ -729,6 +766,8 @@ function lintComponentXml(xml, opts = {}) {
     cfg,
     fileName,
     resources: normalizeResources(opts.resources),
+    // R-04 的「包 id 是否存在」warning 用；空数组 = 不做该判断（索引不完整时不误伤）
+    packages: Array.isArray(opts.packages) ? opts.packages : [],
     grid9Thresholds: (opts.config && opts.config.grid9) || undefined,
     stats: {
       elements: 0,

@@ -559,7 +559,10 @@ function runApplyPhase(ctx, outDir) {
       (genPlan.entries || []).filter((e) => e && e.status !== 'resolved'), null);
   }
 
-  const resources = buildLintResources(projectIndex);
+  const resources = buildLintResources(projectIndex, {
+    targetPkg: genPlan.target && genPlan.target.pkg,
+    targetPkgId: genPlan.target && genPlan.target.pkgId,
+  });
   /** @type {Object[]} */
   const results = [];
   let firstFailure = null;

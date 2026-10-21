@@ -306,22 +306,165 @@ test('dryrun: REUSE（resolved + patch:null）是空操作，不抛错、不改�
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-test('buildLintResources: 带 type（R-11 需要），且无尺寸的登记项（component）不被丢弃', () => {
-  const map = buildLintResources({
+test('buildLintResources: 带 type、按 URL 全量 + 仅目标包本地表（R-11 作用域）', () => {
+  const projectIndex = {
     resources: [
       {
-        pkgId: 'e5f6a7b8', id: 'a7b8c9d0', name: 'reward_icon.png', type: 'image', width: 96, height: 96,
+        pkg: 'MailDetail', pkgId: 'e5f6a7b8', id: 'a7b8c9d0', name: 'reward_icon.png', type: 'image', width: 96, height: 96,
       },
       {
-        pkgId: 'e5f6a7b8', id: 'f6a7b8c9', name: 'MailDetail', type: 'component', width: null, height: null,
+        pkg: 'MailDetail', pkgId: 'e5f6a7b8', id: 'f6a7b8c9', name: 'MailDetail', type: 'component', width: null, height: null,
+      },
+      {
+        pkg: 'Common', pkgId: 'a1b2c3d4', id: 'abc01', name: 'common_img.png', type: 'image', width: 10, height: 10,
       },
     ],
+  };
+  const table = buildLintResources(projectIndex, { targetPkg: 'MailDetail' });
+
+  // 本地表：只有目标包（MailDetail）
+  assert.equal(table.localById.get('a7b8c9d0').type, 'image');
+  assert.equal(table.localById.get('a7b8c9d0').w, 96);
+  assert.equal(table.localById.get('f6a7b8c9').type, 'component');
+  assert.equal(table.localById.get('f6a7b8c9').w, undefined, '无尺寸条目不得伪造 w');
+  // ★ 跨包不泄漏：Common 的 abc01 不在本包短 ID 表里
+  assert.equal(table.get('abc01'), undefined, '短 ID 查找绝不能命中别的包');
+  assert.equal(table.localById.has('abc01'), false);
+
+  // 全量表：ui:// 精确查找跨包可用（R-05/R-10 依赖）
+  assert.equal(table.get('ui://a1b2c3d4/abc01').type, 'image');
+  assert.equal(table.get('ui://e5f6a7b8/a7b8c9d0').w, 96);
+  // ui:// 形态只查全量表（不落到本地短 ID 表）
+  assert.equal(table.get('ui://unknown/pkg'), undefined);
+
+  // D9 计量：带有限 w/h 的条目数（Mail 的图 + Common 的图 = 2）
+  assert.equal(table.measuredCount, 2);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// R-11 作用域（P0）：短 ID 只在**目标包**内查找；R-04 增加包存在性 warning
+// ════════════════════════════════════════════════════════════════════════════
+const { lintComponentXml } = require('../../src/fgui/lint-rules');
+
+/** 造最小组件 XML（displayList 内若干行）。 */
+function wrap(lines) {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<component size="480,320" exported="true">',
+    '  <displayList>',
+    ...lines,
+    '  </displayList>',
+    '</component>',
+    '',
+  ].join('\n');
+}
+
+/** 两包工程索引：MailDetail 有 img（q0jse 只是**名字**）、Common 有 component id=abc02。 */
+const TWO_PKG_INDEX = {
+  project: {
+    packages: [{ name: 'MailDetail', id: 'e5f6a7b8' }, { name: 'Common', id: 'a1b2c3d4' }],
+  },
+  resources: [
+    {
+      pkg: 'MailDetail', pkgId: 'e5f6a7b8', id: 'q0jsh', name: 'q0jse', type: 'image', width: 100, height: 50,
+    },
+    {
+      pkg: 'Common', pkgId: 'a1b2c3d4', id: 'q0jse', name: 'common_comp', type: 'component', width: null, height: null,
+    },
+    {
+      pkg: 'Common', pkgId: 'a1b2c3d4', id: 'abc01', name: 'common_img.png', type: 'image', width: 100, height: 50,
+    },
+    {
+      pkg: 'MailDetail', pkgId: 'e5f6a7b8', id: 'mail_bg', name: 'mail_bg', type: 'image', width: 480, height: 320,
+    },
+  ],
+};
+
+/** lint 一段 XML，注入"目标包=MailDetail"的资源表。 */
+function lintForMail(xml) {
+  const table = buildLintResources(TWO_PKG_INDEX, { targetPkg: 'MailDetail' });
+  return lintComponentXml(xml, {
+    resources: table,
+    packages: TWO_PKG_INDEX.project.packages,
   });
-  // 图片：带尺寸 + type
-  assert.equal(map.a7b8c9d0.type, 'image');
-  assert.equal(map.a7b8c9d0.w, 96);
-  assert.equal(map.a7b8c9d0.h, 96);
-  // 组件：无尺寸但**仍登记**（否则 R-11 只会说"未登记"，说不出"不是图片"）
-  assert.equal(map.f6a7b8c9.type, 'component');
-  assert.equal(map.f6a7b8c9.w, undefined, '无尺寸条目不得伪造 w');
+}
+
+const byRuleId = (r, id) => [...r.errors, ...r.warnings].filter((i) => i.rule === id);
+
+test('★ P0-1 跨包短 ID（本包没有、别的包有）→ 必须报「未登记」', () => {
+  // MailDetail 组件引用只有 Common 才有的短 ID abc01
+  const r = lintForMail(wrap([
+    '    <image id="b00001" name="x" src="abc01" xy="0,0" size="10,10"/>',
+  ]));
+  const issues = byRuleId(r, 'R-11');
+  assert.equal(issues.length, 1, '跨包短 ID 不得被当成"已登记"（改前 0 报）');
+  assert.ok(issues[0].message.includes('没有') || issues[0].message.includes('未登记'));
+});
+
+test('★ P0-2 name/id 撞键 → 报「未登记」，且**不得**说成"不是图片"', () => {
+  // src="q0jse"：MailDetail 里 q0jse 只是某资源的 **name**；Common 里 q0jse 是 component 的 **id**
+  const r = lintForMail(wrap([
+    '    <image id="b00001" name="x" src="q0jse" xy="0,0" size="10,10"/>',
+  ]));
+  const issues = byRuleId(r, 'R-11');
+  assert.equal(issues.length, 1);
+  assert.ok(issues[0].message.includes('没有') || issues[0].message.includes('未登记'),
+    `本包内没有 id=q0jse，应报未登记；实际：${issues[0].message}`);
+  assert.ok(!issues[0].message.includes('不是图片'),
+    '不得把别的包 component 当成引用目标（改前会误报"不是图片"）');
+});
+
+test('★ 正例：目标包内确有该短 ID 的图 → 0 报', () => {
+  const r = lintForMail(wrap([
+    '    <image id="b00001" name="x" src="mail_bg" xy="0,0" size="10,10"/>',
+  ]));
+  assert.deepEqual(byRuleId(r, 'R-11'), []);
+});
+
+test('★ 目标包内短 ID 指向 component → 仍报「不是图片」', () => {
+  const index = {
+    project: { packages: [{ name: 'MailDetail', id: 'e5f6a7b8' }] },
+    resources: [
+      { pkg: 'MailDetail', pkgId: 'e5f6a7b8', id: 'f6a7b8c9', name: 'MailDetail', type: 'component', width: null, height: null },
+    ],
+  };
+  const table = buildLintResources(index, { targetPkg: 'MailDetail' });
+  const r = lintComponentXml(wrap([
+    '    <image id="b00001" name="x" src="f6a7b8c9" xy="0,0" size="10,10"/>',
+  ]), { resources: table, packages: index.project.packages });
+  const issues = byRuleId(r, 'R-11');
+  assert.equal(issues.length, 1);
+  assert.ok(issues[0].message.includes('不是图片'));
+});
+
+test('★ 回归：跨包 ui:// 仍能被 R-05 精确命中（byUrl 全量表未被拆坏）', () => {
+  // Common 的图 100x50；scale9grid 中心矩形 210 宽 → 越界，证明 R-05 命中了跨包资源
+  const r = lintForMail(wrap([
+    '    <image id="b00001" name="x" src="ui://a1b2c3d4/abc01" scale9grid="10,10,210,20" xy="0,0" size="10,10"/>',
+  ]));
+  assert.deepEqual(byRuleId(r, 'R-04'), [], '跨包 ui:// 的包 id 合法（R-04 通过）');
+  const r05 = byRuleId(r, 'R-05');
+  assert.equal(r05.length, 1, 'R-05 应命中 byUrl 里的跨包资源并报越界');
+  assert.ok(/越界/.test(r05[0].message));
+});
+
+test('★ localById 为空（目标包无资源信息）但 byUrl 非空 → R-11 跳过（不产生噪声）', () => {
+  // 目标包设为不存在的包 → 本地表为空
+  const table = buildLintResources(TWO_PKG_INDEX, { targetPkg: 'NoSuchPkg' });
+  assert.equal(table.localById.size, 0);
+  assert.ok(table.byUrl.size > 0, '全量表仍有内容');
+  const r = lintComponentXml(wrap([
+    '    <image id="b00001" name="x" src="abc01" xy="0,0" size="10,10"/>',
+  ]), { resources: table });
+  assert.deepEqual(byRuleId(r, 'R-11'), [], '目标包无资源信息时 R-11 必须跳过');
+});
+
+test('★ R-04: 包 id 不在索引包清单里 → warning（不是 error）', () => {
+  const r = lintForMail(wrap([
+    '    <loader id="b00001" name="x" url="ui://deadbeef/item" xy="0,0" size="10,10"/>',
+  ]));
+  const issues = byRuleId(r, 'R-04');
+  assert.equal(issues.length, 1, '不存在的包 id 应报一条');
+  assert.equal(issues[0].severity, 'warning', '必须是 warning（索引可能不完整，不误伤）');
+  assert.ok(issues[0].message.includes('deadbeef'));
 });
