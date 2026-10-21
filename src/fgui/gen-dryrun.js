@@ -173,7 +173,10 @@ function buildLintResources(projectIndex, opts = {}) {
       entry.h = h;
       table.measuredCount += 1;
     }
-    // 全量表：只放 ui:// 全串（跨包精确查找；R-05/R-10 用）
+    // 全量表：键统一为**归一化形态** `ui://<pkgId>/<itemId>`
+    //   ★ 查表前必须先 `parseUiRef` 归一化 ★ —— 真实工程的引用是拼接无斜杠
+    //   （`ui://mtlga5qj8yoa8k`），直接拿原文查永远命不中
+    //   （这正是 lint 的 R-05/R-10 曾经静默跳过尺寸检查的原因）。
     if (pkgId && id) table.byUrl.set(`ui://${pkgId}/${id}`, entry);
     if (pkgId && name) table.byUrl.set(`ui://${pkgId}/${name}`, entry);
     // 本地表：**仅目标包**（短 ID 查找）

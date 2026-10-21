@@ -468,3 +468,94 @@ test('★ R-04: 包 id 不在索引包清单里 → warning（不是 error）', 
   assert.equal(issues[0].severity, 'warning', '必须是 warning（索引可能不完整，不误伤）');
   assert.ok(issues[0].message.includes('deadbeef'));
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH 兼容缺口：R-05 / R-10 通过统一解析入口拿到真实工程的引用形态
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 改前：`firstUiRef` 只认 `^ui://` → `<image src="q0jse">`（短 ID）拿到 null；
+//       concat `ui://mtlga5qj8yoa8k` 因 lookupResource 的 tail 拆分也命不中
+//       → R-05/R-10 **静默跳过**（九宫格保护在真实工程形态下失效）。
+
+/** 单包工程索引：一张 100x50 的图，id='q0jse'，name='bg.png'。 */
+const ONE_IMG_INDEX = {
+  project: { packages: [{ name: 'Mail', id: 'mailpkg1' }] },
+  resources: [{
+    pkg: 'Mail', pkgId: 'mailpkg1', id: 'q0jse', name: 'bg.png', type: 'image', width: 100, height: 50,
+  }],
+};
+
+const lintWithMail = (xml, idx = ONE_IMG_INDEX) => lintComponentXml(xml, {
+  resources: buildLintResources(idx, { targetPkg: 'Mail' }),
+  packages: idx.project.packages,
+});
+
+test('★ 短 ID + scale9grid → R-05 能拿到尺寸并报越界（改前 ref=null 直接跳过）', () => {
+  const r = lintWithMail(wrap([
+    '    <image id="b00001" name="bg" src="q0jse" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>',
+  ]));
+  const r05 = byRuleId(r, 'R-05');
+  assert.equal(r05.length, 1, '短 ID 引用的图必须能拿到尺寸（否则静默跳过）');
+  assert.ok(/越界/.test(r05[0].message));
+  assert.equal(r05[0].severity, 'error');
+});
+
+test('★ concat ui://（真实工程写法）+ scale9grid → 能解析到资源并报越界', () => {
+  const idx = {
+    project: { packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
+    resources: [{
+      pkg: 'Mail', pkgId: 'mtlga5qj', id: '8yoa8k', name: 'card.png', type: 'image', width: 100, height: 50,
+    }],
+  };
+  const r = lintWithMail(
+    wrap(['    <image id="b00001" name="card" src="ui://mtlga5qj8yoa8k" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>']),
+    idx,
+  );
+  const r05 = byRuleId(r, 'R-05');
+  assert.equal(r05.length, 1, 'concat 引用必须被归一化后命中（改前 tail 拆分命不中）');
+  assert.ok(/越界/.test(r05[0].message));
+});
+
+test('★ slash ui:// + scale9grid → 同样能解析（两种风格并存）', () => {
+  const idx = {
+    project: { packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
+    resources: [{
+      pkg: 'Mail', pkgId: 'mtlga5qj', id: '8yoa8k', name: 'card.png', type: 'image', width: 100, height: 50,
+    }],
+  };
+  const r = lintWithMail(
+    wrap(['    <image id="b00001" name="card" src="ui://mtlga5qj/8yoa8k" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>']),
+    idx,
+  );
+  assert.equal(byRuleId(r, 'R-05').length, 1);
+});
+
+test('★ 引用指向未知资源 → 可见 warning（不是 error，不静默跳过）', () => {
+  const r = lintWithMail(wrap([
+    '    <image id="b00001" name="bg" src="ui://mailpkg1/not_exist" scale9grid="1,1,2,2" xy="0,0" size="100,50"/>',
+  ]));
+  const r05 = byRuleId(r, 'R-05');
+  assert.equal(r05.length, 1, '未知资源必须产生可见告警，不得静默跳过');
+  assert.equal(r05[0].severity, 'warning', '索引不完整时不误伤 → warning');
+  assert.ok(/无法对账/.test(r05[0].message));
+  assert.ok(/not_exist/.test(r05[0].message), '告警应点名未知的引用');
+});
+
+test('★ R-11 回归：统一解析入口后，跨包短 ID 仍报「未登记」', () => {
+  const idx = {
+    project: { packages: [{ name: 'Mail', id: 'mailpkg1' }, { name: 'Common', id: 'commpkg1' }] },
+    resources: [
+      // 目标包 Mail 必须有资源，R-11 才具备"判断能力"（否则整条规则跳过，不产生噪声）
+      {
+        pkg: 'Mail', pkgId: 'mailpkg1', id: 'mail_bg', name: 'mail_bg.png', type: 'image', width: 10, height: 10,
+      },
+      {
+        pkg: 'Common', pkgId: 'commpkg1', id: 'abc01', name: 'other.png', type: 'image', width: 10, height: 10,
+      },
+    ],
+  };
+  const r = lintWithMail(wrap(['    <image id="b00001" name="x" src="abc01" xy="0,0" size="10,10"/>']), idx);
+  const r11 = byRuleId(r, 'R-11');
+  assert.equal(r11.length, 1, '跨包短 ID 必须仍报未登记（作用域未被重构破坏）');
+  assert.ok(/没有|未登记/.test(r11[0].message));
+});

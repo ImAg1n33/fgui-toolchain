@@ -126,6 +126,115 @@ function lookupResource(resMap, ref) {
   return null;
 }
 
+/**
+ * 统一解析「这个节点引用了哪个资源」—— R-05 / R-10 / R-11 **一处实现、三处复用**。
+ *
+ * ★ 为什么需要它（PATCH 兼容缺口，2026-10-21）★
+ *   改造前 R-05/R-10 用 `firstUiRef()`，后者只认 `/^ui:\/\//`：
+ *     · 真实工程 `<image src="q0jse">`（**短资源 ID**）→ ref=null → **尺寸检查直接跳过**；
+ *     · 真实工程 `ui://mtlga5qj8yoa8k`（**拼接无斜杠**）→ `lookupResource` 的
+ *       `tail = ref.split('/').pop()` 拿到的是整串 → **同样命不中**。
+ *   两者叠加的后果：九宫格那套保护（R-10 的胶囊事故防线）在真实工程形态下**静默失效**。
+ *
+ * 分步（按顺序）：
+ *   1. `cfg.urlAttributes` 里**形态合法**的 `ui://` 引用 → `parseUiRef` 解析（天然支持
+ *      slash 与 concat）→ 用**归一化键** `ui://<pkgId>/<itemId>` 查表（表就是按归一化键登记的）；
+ *      查不到再把 `itemId` 当短 ID 查 `localById`（兼容"引用了别的包却只写了 id"的病态输入，
+ *      命中时带回 note 提示人工确认）。
+ *   2. `<image>` 的 `src` **不含 `://`** → 直接按短 ID 查 `localById`。
+ *   3. 都拿不到 → 返回 `null` + **明确原因**（`no-ref` / `no-resources` / `unknown-resource`），
+ *      由调用方写进告警/notes —— **绝不静默跳过**。
+ *
+ * @param {Object} node
+ * @param {Object} resMap 资源表（LintResourceTable 或普通 Map）
+ * @param {Object} cfg
+ * @param {Object} [opts]
+ * @param {boolean} [opts.shortIdOnly=false] 只走第 2 步（R-11 用）
+ * @returns {{entry:Object|null, attr:string|null, raw:string|null,
+ *            reason:null|'no-ref'|'no-resources'|'unknown-resource', note:string|null}}
+ */
+function resolveResourceReference(node, resMap, cfg, opts = {}) {
+  const noRef = {
+    entry: null, attr: null, raw: null, reason: 'no-ref', note: null,
+  };
+  if (!node || !node.attrs) return noRef;
+
+  const localTable = resMap && resMap.localById ? resMap.localById : null;
+  const localSize = localTable
+    ? localTable.size
+    : (resMap && typeof resMap.size === 'number' ? resMap.size : 0);
+  const tableEmpty = !resMap || (typeof resMap.size === 'number' && resMap.size === 0);
+  const shortIdMode = opts.shortIdOnly === true;
+
+  const reasons = [];
+  const getByKey = (key) => (resMap && typeof resMap.get === 'function' ? resMap.get(key) : null);
+  const getLocal = (v) => (localTable ? localTable.get(v) : getByKey(v));
+  const noResources = {
+    entry: null, attr: null, raw: null, reason: 'no-resources', note: null,
+  };
+
+  // ── 第 1 步：形态合法的 ui:// 引用（短 ID 模式跳过）──
+  if (!shortIdMode) {
+    for (const attr of (cfg.urlAttributes || [])) {
+      const raw = node.attrs[attr];
+      if (typeof raw !== 'string' || !/^ui:\/\//i.test(raw)) continue;
+      const parsed = parseUiRef(raw);
+      if (!parsed) {
+        reasons.push(`${attr}="${raw}" 不是合法 ui:// 引用`);
+        continue;
+      }
+      // ★ 查表前必须先归一化 ★：表按 `ui://<pkgId>/<itemId>` 登记；
+      //   直接拿原文查（concat 形态）永远命不中 —— 这正是原缺口。
+      const key = `ui://${parsed.pkgId}/${parsed.itemId}`;
+      const hit = getByKey(key);
+      if (hit) {
+        return {
+          entry: hit, attr, raw, reason: null, note: null,
+        };
+      }
+      // 兜底：把 itemId 当短 ID 查**本地表**（"引用了别的包却只写了 id"的病态输入）
+      const byLocal = parsed.itemId ? getLocal(parsed.itemId) : null;
+      if (byLocal) {
+        return {
+          entry: byLocal,
+          attr,
+          raw,
+          reason: null,
+          note: `${attr}="${raw}" 未按 ${key} 命中，已退化为按短 ID '${parsed.itemId}'`
+            + ' 在**目标包**内命中 —— 请确认该引用是否本就该指向本包',
+        };
+      }
+      reasons.push(`${attr}="${raw}" 指向的资源未登记（归一化键 ${key}）`);
+    }
+    if (tableEmpty) return noResources;
+  }
+
+  // ── 第 2 步：短资源 ID（image.src 且不含 ://）──
+  const src = node.attrs.src;
+  if (typeof src === 'string' && src.trim() && !src.includes('://')) {
+    const val = src.trim();
+    if (localSize === 0) return noResources;
+    const hit = getLocal(val);
+    if (hit) {
+      return {
+        entry: hit, attr: 'src', raw: src, reason: null, note: null,
+      };
+    }
+    reasons.push(`src="${val}" 是短资源 ID，但目标包内没有该 id`);
+    return {
+      entry: null, attr: 'src', raw: src, reason: 'unknown-resource', note: reasons.join('；'),
+    };
+  }
+
+  // ── 第 3 步：拿不到 ──
+  if (!shortIdMode && reasons.length) {
+    return {
+      entry: null, attr: null, raw: null, reason: 'unknown-resource', note: reasons.join('；'),
+    };
+  }
+  return noRef;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 第三部分：规则实现
 // ════════════════════════════════════════════════════════════════════════════
@@ -175,29 +284,16 @@ function collectDisplayObjects(root) {
 }
 
 /**
- * 元素上第一个 ui:// 引用（按配置的属性顺序）。
- *
- * ★ scheme 大小写不敏感识别 ★（QA 第三轮：原实现只认小写 `ui://`，
- *   大写 `UI://` 会**完全跳过 R-04 包 id 校验** —— 明确的绕过路径）。
- *   识别后按原值参与 R-04 校验（位数/结构），报错信息里带原值，
- *   用户能看到自己写的是 `UI://`。FairyGUI 规范写法是小写，
- *   P1-b 生成侧只产出小写（写入 P1-b 设计备忘）。
- */
-function firstUiRef(node, cfg) {
-  for (const attr of cfg.urlAttributes) {
-    const v = node.attrs[attr];
-    if (typeof v === 'string' && /^ui:\/\//i.test(v)) return { attr, value: v };
-  }
-  return null;
-}
-
-/**
  * 按**指定属性清单**找第一个 ui:// 引用（R-04 专用）。
  *
- * 与 `firstUiRef` 的区别：后者用 `cfg.urlAttributes`（"指向可测量资源的属性"，
- * R-05/R-10 依赖它去量图片宽高）；本函数用 `cfg.uiRefAttributes`（含 `font`），
- * 只服务"引用合法性校验"。把 `font` 混进 urlAttributes 会让 R-05/R-10 把
- * `<text font="ui://…">` 当成引用了一张图 → 误报，故两份清单分开。
+ * ★ 为什么 R-04 用独立清单 `cfg.uiRefAttributes`（含 `font`）★
+ *   它只服务"引用合法性校验"；而 `cfg.urlAttributes` 是"指向**可测量尺寸**的资源"，
+ *   R-05/R-10 依赖它去量图片宽高。把 `font` 混进 urlAttributes 会让
+ *   `<text font="ui://…">` 被当成引用了一张图 → 误报。
+ *
+ * ★ 已删除旧的 `firstUiRef(node, cfg)`（只认 `ui://`）★
+ *   真实工程的短 ID `src="q0jse"` 在那里永远是 null，导致 R-05/R-10 **静默跳过**。
+ *   现在"这个节点引用了哪个资源"统一走 `resolveResourceReference()`。
  *
  * @param {Object} node
  * @param {string[]} attrs
@@ -461,13 +557,10 @@ function checkShortSrcRefs(ctx) {
     if (val.includes('://')) return; // ui:// 形态 → R-04 负责
 
     const at = node.attrPos.src || { line: node.line, col: node.col };
-    // ★ src 的短 ID 是**资源 id**，不是 name ★
-    //   表对象（gen-dryrun 的 LintResourceTable）里有 localById → 只按 id 查。
-    //   若回退到 name（get() 的二级查找），撞键场景（本包存在 **name** 相同的资源）
-    //   会静默放行，而那恰恰是「引用了一个不存在的 id」的典型误判。
-    //   普通 Map（调用方手工注入 {id: {...}}）没有分离信息，退回 get()。
-    const idTable = resMap.localById || resMap;
-    const hit = idTable.get(val) || null;
+    // ★ 复用统一解析入口（shortIdOnly）★
+    //   短 ID 只查**目标包的 id**（不回退 name：撞键场景会静默放行，见 P0 修复）。
+    const resolved = resolveResourceReference(node, resMap, ctx.cfg, { shortIdOnly: true });
+    const hit = resolved.entry;
     if (!hit) {
       issues.push({
         severity: 'error',
@@ -527,10 +620,30 @@ function checkScale9Grid(ctx) {
       return;
     }
     // 边界对账：需要调用方注入图片尺寸（本模块不做 I/O）
-    const ref = firstUiRef(node, ctx.cfg);
-    const info = ref ? lookupResource(ctx.resources, ref.value) : null;
+    //   ★ 用统一解析入口（支持短 ID 与 concat/slash 两种 ui://）★
+    const resolved = resolveResourceReference(node, ctx.resources, ctx.cfg);
+    const info = resolved.entry;
+    if (resolved.note && resolved.reason === null) {
+      // 退化命中（跨包引用却只写了短 ID）—— 不静默，提示人工确认
+      issues.push({
+        severity: 'warning',
+        message: `scale9grid 资源解析降级：${resolved.note}。位置：`
+          + `${pathOf(node)} 的 scale9grid 属性（第 ${at.line} 行）`,
+        line: at.line, col: at.col, node, target: v,
+      });
+    }
     if (!info || !Number.isFinite(info.w) || !Number.isFinite(info.h)) {
       stats.sizeUnknown++;
+      // 引用指向未知资源 → 不静默（warning，不是 error：索引不完整时不误伤）
+      if (resolved.reason === 'unknown-resource') {
+        issues.push({
+          severity: 'warning',
+          message: `scale9grid 无法对账（尺寸未知）：${resolved.note}`
+            + ' —— 九宫格边界检查已跳过，请核对资源登记或重跑 project-index。位置：'
+            + `${pathOf(node)} 的 scale9grid 属性（第 ${at.line} 行）`,
+          line: at.line, col: at.col, node, target: v,
+        });
+      }
       return;
     }
     stats.checked++;
@@ -538,7 +651,8 @@ function checkScale9Grid(ctx) {
     if (l + w > info.w || t + h > info.h) {
       issues.push({
         severity: 'error',
-        message: `scale9grid="${v}" 越界：中心矩形 (${l},${t},${w}x${h}) 超出图片 ${ref.value} 的尺寸 `
+        message: `scale9grid="${v}" 越界：中心矩形 (${l},${t},${w}x${h}) 超出图片 `
+          + `${resolved.raw || resolved.attr} 的尺寸 `
           + `${info.w}x${info.h}（右边界 ${l + w} > ${info.w} 或 下边界 ${t + h} > ${info.h}）——`
           + '上游 resolveScale9Grid 对越界直接抛错，运行期会炸。位置：'
           + `${pathOf(node)} 的 scale9grid 属性（第 ${at.line} 行）`,
@@ -678,21 +792,23 @@ function checkGrid9(ctx) {
   const thresholds = ctx.grid9Thresholds;
   walkElements(ctx.parsed.root, (node) => {
     if (node.attrs.scale9grid === undefined) return;
-    const ref = firstUiRef(node, ctx.cfg);
-    const info = ref ? lookupResource(ctx.resources, ref.value) : null;
+    // ★ 用统一解析入口：短 ID 与 concat/slash 两种 ui:// 都能拿到资源 ★
+    //   （改前 `firstUiRef` 只认 `ui://`，真实工程的 `src="q0jse"` 直接 ref=null → 静默跳过）
+    const resolved = resolveResourceReference(node, ctx.resources, ctx.cfg);
+    const info = resolved.entry;
     if (!info || !info.features) {
       stats.noFeatures++;
-      return;
+      return; // 「未提供 features」已由 notes 显式说明（不静默）；未知资源由 R-05 报 warning，避免重复
     }
     stats.checked++;
     const r = computeGrid9(info.features, thresholds);
     if (r.verdict === 'NEVER') {
       issues.push({
         severity: 'warning',
-        message: `${pathOf(node)} 对图片 ${ref.value} 设置了 scale9grid，但九宫格启发式判定为 NEVER`
+        message: `${pathOf(node)} 对图片 ${resolved.raw || resolved.attr} 设置了 scale9grid，但九宫格启发式判定为 NEVER`
           + `（禁切）：${r.evidence.join('；')}。拉伸可能破形（线上事故方向）。`
           + '注意：启发式有已知误判（HANDOFF-P1 §2.1 六项），此处只告警不拦截，请人工确认',
-        line: node.line, col: node.col, node, target: ref.value,
+        line: node.line, col: node.col, node, target: resolved.raw || resolved.attr,
       });
     }
     // CAN_9GRID / SINGLE_AXIS_ONLY 不产 finding：
@@ -852,4 +968,6 @@ module.exports = {
   walkElements,
   collectDisplayObjects,
   findDisplayLists,
+  // 统一资源引用解析入口（R-05/R-10/R-11 共用；导出以便单测与后续复用）
+  resolveResourceReference,
 };
