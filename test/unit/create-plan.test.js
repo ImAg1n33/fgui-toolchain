@@ -188,14 +188,58 @@ test('★ 未匹配资源 → toImport（带建议文件名与尺寸，绝不静
   assert.ok(node.notes.some((x) => x.includes('toImport')), '节点也要说明');
 });
 
-test('★ 图标禁止拉伸: bbox 48x48 vs 固有 96x96 → size 保留 96,96 + unresolved non-uniform-scale', () => {
-  const plan = build();
-  const icon = plan.nodes.find((n) => n.source.layerId === 'L002');
-  assert.equal(icon.attrs.size, '96,96', '★ 未被拉伸到 48x48');
-  const u = plan.unresolved.find((x) => x.layerId === 'L002');
-  assert.ok(u, '必须记 unresolved');
-  assert.equal(u.reason, 'non-uniform-scale');
-  assert.ok(u.hint.includes('96x96'));
+test('★ 图标等比缩放+居中: bbox 48x48 vs 固有 96x96 → size 48,48（scale 0.5）且居中', () => {
+  // team-lead 实跑数据：bbox 48×48 @ (340,700)、资源固有 96×96。
+  // 期望：等比缩到刚好装下（0.5）→ 48×48；并在 bbox 内居中（宽高都等于 bbox，故 xy 不变）。
+  const idx = indexFixture();
+  idx.resources.push({
+    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic2', name: '小图标.png',
+    exported: 'true', width: 96, height: 96,
+  });
+  const ir = irFixture();
+  ir.layers.splice(1, 0, layer('L020', '小图标', 'raster', { x: 340, y: 700, w: 48, h: 48 }));
+  const plan = build({ ir, projectIndex: idx });
+  const n = plan.nodes.find((x) => x.source.layerId === 'L020');
+  assert.equal(n.attrs.size, '48,48', '★ 等比缩放 0.5 → 恰好铺满 bbox');
+  assert.equal(n.attrs.xy, '340,700', '★ 居中后 xy 与 bbox 左上角一致（size == bbox）');
+  const u = plan.unresolved.find((x) => x.layerId === 'L020');
+  assert.ok(u && u.reason === 'non-uniform-scale');
+  assert.ok(u.hint.includes('0.5'), `hint 应给出实际 scale，实际：${u.hint}`);
+  assert.ok(u.hint.includes('48,48'), 'hint 应给出最终 size');
+  assert.ok(u.hint.includes('340,700'), 'hint 应给出最终 xy');
+});
+
+test('★ 图标等比缩放: bbox 200x200 vs 固有 96x96 → scale 被 1 截断（不放大）+ 居中', () => {
+  // 期望：scale = min(200/96, 200/96, 1) = 1 → size 96×96；
+  //       xy = bbox.x + (200-96)/2 = 340+52 = 392；y 同理 700+52 = 752。
+  const idx = indexFixture();
+  idx.resources.push({
+    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic3', name: '大框小图.png',
+    exported: 'true', width: 96, height: 96,
+  });
+  const ir = irFixture();
+  ir.layers.splice(1, 0, layer('L021', '大框小图', 'raster', { x: 340, y: 700, w: 200, h: 200 }));
+  const plan = build({ ir, projectIndex: idx });
+  const n = plan.nodes.find((x) => x.source.layerId === 'L021');
+  assert.equal(n.attrs.size, '96,96', '★ scale 上限 1：绝不放大');
+  assert.equal(n.attrs.xy, '392,752', '★ 在 bbox 内居中');
+  const u = plan.unresolved.find((x) => x.layerId === 'L021');
+  assert.ok(u.hint.includes('scale=1'), `hint 应说明 scale 被截断为 1，实际：${u.hint}`);
+});
+
+test('图标: 宽高比不同（bbox 120x48 vs 固有 96x96）→ 等比缩到装得下（0.5）并居中', () => {
+  const idx = indexFixture();
+  idx.resources.push({
+    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic4', name: '异形.png',
+    exported: 'true', width: 96, height: 96,
+  });
+  const ir = irFixture();
+  ir.layers.splice(1, 0, layer('L022', '异形', 'raster', { x: 100, y: 800, w: 120, h: 48 }));
+  const plan = build({ ir, projectIndex: idx });
+  const n = plan.nodes.find((x) => x.source.layerId === 'L022');
+  // scale = min(120/96=1.25, 48/96=0.5, 1) = 0.5 → 48x48；x 居中 = 100+(120-48)/2 = 136；y = 800+0 = 800
+  assert.equal(n.attrs.size, '48,48');
+  assert.equal(n.attrs.xy, '136,800');
 });
 
 test('九宫格: 摆放 > 固有 且资源具备 9grid → 建议 scale9grid（无切格值不猜）', () => {

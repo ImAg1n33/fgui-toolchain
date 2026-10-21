@@ -314,14 +314,38 @@ function buildCreatePlan(args = {}) {
               sizeW = rw; sizeH = rh;
             }
           } else if (!same) {
-            // ⑤ 图标/立绘禁止拉伸：保留固有尺寸
-            sizeW = rw; sizeH = rh;
-            node.notes.push(`IR bbox ${layer.bbox.w}x${layer.bbox.h} 与资源固有 ${rw}x${rh} 不一致，`
-              + '按「图标/立绘禁止拉伸」保留固有尺寸');
+            // ⑤ 图标/立绘：**等比缩放（上限 1，不放大） + 在 bbox 内居中**。
+            //
+            // ★ 为什么不是「保留固有尺寸」★（team-lead 实跑踩到）
+            //   原实现只把 size 换成固有尺寸，xy 仍是 bbox 左上角 → 实际占位
+            //   (bbox.x .. bbox.x+固有w) ，比设计稿**偏移** (固有w-bbox.w)/2。
+            //   例：bbox 48×48 @ (340,700)、固有 96×96 → 占 (340..436)，
+            //   而效果图要的是居中在 (340..388) —— 偏 24px，验收不合格
+            //   （朋友原话「做到百分之百与效果图重合」）。
+            //   SKILL.md 的原文是「不要拉大 size，**用等比缩放**，不设九宫格」，
+            //   即：等比缩到装得下、但不放大；随之必须在 bbox 内居中。
+            const scale = Math.min(layer.bbox.w / rw, layer.bbox.h / rh, 1);
+            let fw = Math.round(rw * scale);
+            let fh = Math.round(rh * scale);
+            // round 可能进位一格 —— 夹回 bbox，保证「装得下」
+            fw = Math.min(fw, layer.bbox.w);
+            fh = Math.min(fh, layer.bbox.h);
+            const fx = Math.round(layer.bbox.x + (layer.bbox.w - fw) / 2);
+            const fy = Math.round(layer.bbox.y + (layer.bbox.h - fh) / 2);
+            sizeW = fw;
+            sizeH = fh;
+            node.attrs.xy = `${fx},${fy}`;
+            const scaleText = Number(scale.toFixed(4));
+            node.notes.push(`IR bbox ${layer.bbox.w}x${layer.bbox.h} 与资源固有 ${rw}x${rh} 不一致：`
+              + `按「等比缩放、不放大」缩放 scale=${scaleText} → ${fw}x${fh}，并在 bbox 内居中`);
             unresolved.push({
               layerId: layer.id,
+              // ⚠ reason 保留 `non-uniform-scale`：这是既有契约名（e2e/下游已按此匹配），
+              //   语义已从「不缩放」升级为「等比缩放 + 居中」，但改名会破坏契约，故只更新 hint。
               reason: 'non-uniform-scale',
-              hint: `图标/立绘禁止拉伸，已保留固有尺寸 ${rw}x${rh}`,
+              hint: `图标/立绘等比缩放 scale=${scaleText}（上限 1，不放大）→ size=${fw},${fh}`
+                + `，居中 xy=${fx},${fy}（原 bbox ${layer.bbox.w}x${layer.bbox.h} @ `
+                + `${layer.bbox.x},${layer.bbox.y}，固有 ${rw}x${rh}）`,
             });
           }
         }
@@ -436,7 +460,8 @@ function buildCreatePlan(args = {}) {
       + '本文件可人工编辑（改 name/attrs/layer）后交给后续导入步骤。',
     _fieldNote: {
       nodes: '页面直接子节点，按 layer 升序（0 = 最底，背景固定 img_bg）',
-      'nodes[].attrs': 'xy/size 直接取 IR bbox（绝对定位，不做缩放换算）',
+      'nodes[].attrs': 'xy/size 取 IR bbox（绝对定位，不做整体缩放换算）；'
+        + '**例外**：资源固有尺寸与 bbox 不一致的图标/立绘，等比缩放（上限 1，不放大）并在 bbox 内居中',
       'nodes[].attrs.src': '同包短资源 ID（真实工程形态），**不是** ui:// 引用',
       'nodes[].estimated': 'true 表示含估计值（如 fontsize），需人工确认',
       assets: 'reused = 复用的同包资源；toImport = 需先导入并登记的素材（绝不静默丢弃）',

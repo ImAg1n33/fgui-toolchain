@@ -231,17 +231,20 @@ test('⑤ 未匹配资源进 toImport，且带 reason 与建议尺寸', () => {
   assert.ok(plan.assets.toImport.some((x) => x.layerId === 'L008'));
 });
 
-test('⑥ 图标 bbox 48x48 vs 固有 96x96 → size 未被拉伸 + unresolved(non-uniform-scale)', () => {
+test('⑥ 图标 bbox 48x48 vs 固有 96x96 → **等比缩放 0.5 并居中**（不放大、不偏移）', () => {
   const f = setup('nostretch');
   assert.equal(runCreatePlan(f).code, 0);
   const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
 
   const icon = plan.nodes.find((n) => n.source.layerId === 'L002');
-  assert.equal(icon.attrs.size, '96,96', '★ 未被拉伸到 48x48');
+  // 等比缩到刚好装下：scale = min(48/96, 48/96, 1) = 0.5 → 48×48，铺满 bbox
+  assert.equal(icon.attrs.size, '48,48', '★ 等比缩放 0.5，恰好铺满 bbox（不放大）');
+  assert.equal(icon.attrs.xy, '120,200', '★ 居中：size==bbox 时 xy 与 bbox 左上一致（不偏移）');
   const u = plan.unresolved.find((x) => x.layerId === 'L002');
   assert.ok(u, '必须记 unresolved');
   assert.equal(u.reason, 'non-uniform-scale');
-  assert.ok(u.hint.includes('96x96'));
+  assert.ok(u.hint.includes('0.5'), `hint 应给出实际 scale，实际：${u.hint}`);
+  assert.ok(u.hint.includes('48,48'), 'hint 应给出最终 size');
 });
 
 // ════════════════════════════════════════════════════════════════════════════
