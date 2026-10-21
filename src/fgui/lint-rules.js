@@ -42,12 +42,16 @@
  *   另：真实编辑器版本（Q1）未确认，上述宽松度可能随 Q1 答案收紧。
  */
 
-const { deepMerge } = require('../core/config');
-const {
+const { deepMerge } = require('../core/config');const {
   unescapeXml, parseXmlDocument, pathOf,
 } = require('./xml-parse');
 const { sortBy } = require('../core/determinism');
 const { computeGrid9 } = require('../imaging/grid9');
+// ★ R-04 改用共享解析器（同时支持 slash 与 concat 两种 ui:// 风格）★
+//   M2-SPEC §4.2 ⑩：真实 FairyGUI 6.1.4 工程的引用是**拼接无斜杠**
+//   （如 `ui://mtlga5qj8yoa8k`）；R-04 原先自写的只认 slash 的正则会把整串当包 id
+//   （14 位）→ 把合法引用判成「包 id 不是 8 位」+「缺少 itemId」两个 error。
+const { parseUiRef } = require('./resource-resolver');
 const {
   DEFAULT_FGUI_CONFIG, COLOR_HEX6_RE, COLOR_HEX8_RE, buildIdPattern,
 } = require('./constants');
@@ -327,7 +331,14 @@ function checkColors(ctx) {
   return issues;
 }
 
-// ---- R-04：ui:// 包 id 位数校验 ----
+// ---- R-04：ui:// 包 id 位数校验（同时接受 slash 与 concat 两种风格）----
+//
+// ★ M2-SPEC §4.2 ⑩ 修正 ★
+//   真实 FairyGUI 6.1.4 工程的引用是**拼接无斜杠**：`ui://mtlga5qj8yoa8k`
+//   （pkgId=mtlga5qj, itemId=8yoa8k）。原实现自写正则 `/^ui:\/\/([^/]*)(?:\/(.*))?$/`
+//   会把整串当 pkgId（14 位）→ 报「包 id 不是 8 位」+「缺少 itemId」**两个 error**，
+//   把真实工程的**合法**引用判成错误。改用 `parseUiRef`（已同时支持两种风格），
+//   拆分规则：concat 形态取「前 pkgIdLength 位为包 id、其余为 itemId」。
 function checkUiRefs(ctx) {
   const issues = [];
   const want = ctx.cfg.pkgIdLength;
@@ -335,33 +346,107 @@ function checkUiRefs(ctx) {
     const ref = firstUiRef(node, ctx.cfg);
     if (!ref) return;
     const at = node.attrPos[ref.attr] || { line: node.line, col: node.col };
-    const m = /^ui:\/\/([^/]*)(?:\/(.*))?$/i.exec(ref.value);
-    if (!m) {
+    const parsed = parseUiRef(ref.value);
+    // 斜杠形态优先：以第一个 '/' 为界拆分。
+    // ★ 为什么不直接信 parseUiRef 的 style ★：`ui://abc123/popup_bg`（6 位包 id + 斜杠）
+    //   会被 parseUiRef 的 concat 分支按「前 8 位」硬切成 pkgId='abc123/p'、itemId='opup_bg'
+    //   —— 长度恰好 8，于是**把要报的 6 位包 id 掩藏成"合法"**。而 R-04 的职责正是报出
+    //   位数错误，故含 '/' 时按 '/' 拆分（这样 6 位也能被抓到）。
+    //   concat（无 '/'）才用 parseUiRef 的拆分结果。
+    const body = String(ref.value).trim().replace(/^ui:\/\//i, '');
+    const slashIdx = body.indexOf('/');
+    /** @type {string|null} */
+    let pkgId = null;
+    /** @type {string|null} */
+    let itemId = null;
+    if (slashIdx >= 0) {
+      pkgId = body.slice(0, slashIdx);
+      itemId = body.slice(slashIdx + 1);
+    } else if (parsed) {
+      pkgId = parsed.pkgId;
+      itemId = parsed.itemId;
+    }
+    if (!pkgId) {
       issues.push({
         severity: 'error',
-        message: `${ref.attr}="${ref.value}" 不是合法 ui:// 引用：期望 ui://<包id>/<资源名>。`
+        message: `${ref.attr}="${ref.value}" 不是合法 ui:// 引用：期望 `
+        + `ui://<包id>/<资源名>（斜杠）或 ui://<包id><资源名>（拼接，上游编辑器风格）。`
         + `位置：${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
         line: at.line, col: at.col, node, target: ref.value,
       });
       return;
     }
-    const pkgId = m[1];
     if (pkgId.length !== want) {
       issues.push({
         severity: 'error',
         message: `${ref.attr}="${ref.value}" 的包 id '${pkgId}' 是 ${pkgId.length} 位，`
           + `应为 ${want} 位。上游事故：6 位包 id 会吃掉 itemId 首字符，导致 27 张图 + 组件`
-          + '静默丢失（发布成功但内容缺）。位置：'
+          + '静默丢失（发布成功但内容缺）。修复方向：把包 id 补齐/改为 package.xml 里的 8 位 id。位置：'
           + `${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
         line: at.line, col: at.col, node, target: pkgId,
       });
     }
-    if (!m[2]) {
+    if (!itemId) {
       issues.push({
         severity: 'error',
-        message: `${ref.attr}="${ref.value}" 缺少 itemId：ui:// 引用必须是 ui://<包id>/<资源名> 完整形式。`
-        + `位置：${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
+        message: `${ref.attr}="${ref.value}" 缺少 itemId：ui:// 引用必须同时给出资源标识`
+          + `（ui://<包id>/<资源名> 或 ui://<包id><资源名>）。修复方向：补上 itemId。位置：`
+          + `${pathOf(node)} 的 ${ref.attr} 属性（第 ${at.line} 行）`,
         line: at.line, col: at.col, node, target: ref.value,
+      });
+    }
+  });
+  return issues;
+}
+
+// ---- R-11：短资源 ID `src` 的登记性校验 ----
+//
+// ★ 为什么需要（M2-SPEC §4.2 ⑩）★
+//   真实工程里组件内 `<image>` 引用**同包**图片用的是**短资源 ID**：
+//     `src="q0jse"`（即 package.xml 里 `resources[].id`），**不带 `ui://`**。
+//   改了形态之后 R-04 检不到它们（R-04 只看 `ui://`），于是会丢掉
+//   「这个引用指向的资源是否存在」这一层保护 —— 本规则补上。
+//
+// 边界（刻意不做，避免噪声/越权）：
+//   · 只对 `<image>` 的 `src` 生效；其它属性/标签的 `ui://` 交给 R-04；
+//   · 值里含 `://` → 交给 R-04，本规则不重复报；
+//   · `resources` 未注入（空表）→ **整条规则跳过**（无登记信息时无法判断，
+//     宁可不动；`LINT_RESOURCES_EMPTY` 已经会就"资源表为空"发出显式告警）。
+function checkShortSrcRefs(ctx) {
+  const issues = [];
+  const resMap = ctx.resources;
+  // 未注入资源信息 → 跳过（不产生噪声；空表告警由 gen-dryrun 的 LINT_RESOURCES_EMPTY 负责）
+  if (!resMap || typeof resMap.get !== 'function' || resMap.size === 0) return issues;
+
+  walkElements(ctx.parsed.root, (node) => {
+    if (node.tag !== 'image') return;
+    const raw = node.attrs.src;
+    if (typeof raw !== 'string') return;
+    const val = raw.trim();
+    if (!val) return;
+    if (val.includes('://')) return; // ui:// 形态 → R-04 负责
+
+    const at = node.attrPos.src || { line: node.line, col: node.col };
+    const hit = resMap.get(val) || null;
+    if (!hit) {
+      issues.push({
+        severity: 'error',
+        message: `image 的 src="${val}" 是短资源 ID，但目标包 resources[] 里**没有**这个 id`
+          + ' —— 引用会静默失效（发布成功但图片不显示）。请核对 package.xml 是否登记该资源，'
+          + '或改用 ui:// 引用。位置：'
+          + `${pathOf(node)} 的 src 属性（第 ${at.line} 行）`,
+        line: at.line, col: at.col, node, target: val,
+      });
+      return;
+    }
+    // 命中项若带 type 且不是 image → 引用了非图片资源（组件/字体等）
+    if (hit.type !== undefined && hit.type !== null && hit.type !== 'image') {
+      issues.push({
+        severity: 'error',
+        message: `image 的 src="${val}" 指向的是 type='${hit.type}' 的资源，不是图片`
+          + ' —— 图片节点的 src 必须引用图片资源，否则运行时不渲染。位置：'
+          + `${pathOf(node)} 的 src 属性（第 ${at.line} 行）`,
+        line: at.line, col: at.col, node, target: val,
       });
     }
   });
@@ -589,6 +674,7 @@ const RULES = Object.freeze([
   { id: 'R-08', title: '语义命名（禁无语义名）', check: checkNames },
   { id: 'R-09', title: '单组件对象数上限', check: checkObjectCount },
   { id: 'R-10', title: '九宫格适用性（复用 grid9.js）', check: checkGrid9 },
+  { id: 'R-11', title: '短资源 ID src 的登记性校验（image src 不含 ui://）', check: checkShortSrcRefs },
 ]);
 
 // ════════════════════════════════════════════════════════════════════════════

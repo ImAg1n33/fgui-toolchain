@@ -532,9 +532,9 @@ test('notes: 未注入资源时明确记录跳过（不允许静默跳过）', (
   assert.equal(r.stats.grid9.noFeatures, 1);
 });
 
-test('规则表导出完整（R-00 ~ R-10 共 11 条）', () => {
+test('规则表导出完整（R-00 ~ R-11 共 12 条）', () => {
   const ids = RULES.map((r) => r.id);
-  assert.deepEqual(ids, ['R-00', 'R-01', 'R-02', 'R-03', 'R-04', 'R-05', 'R-06', 'R-07', 'R-08', 'R-09', 'R-10']);
+  assert.deepEqual(ids, ['R-00', 'R-01', 'R-02', 'R-03', 'R-04', 'R-05', 'R-06', 'R-07', 'R-08', 'R-09', 'R-10', 'R-11']);
   for (const r of RULES) assert.ok(r.title && r.title.length > 4, `${r.id} 应有可读标题`);
 });
 
@@ -636,4 +636,116 @@ test('★ 大写 UI:// 现在也走 R-04 包 id 校验（原绕过路径已闭�
   const ok = legalComponentXml().replace('ui://abcd1234/popup_bg', 'UI://abcd1234/popup_bg');
   const r2 = lintComponentXml(ok, { resources: RESOURCES });
   assert.equal(byRule(r2, 'R-04').length, 0, '大写 scheme + 合法 8 位包 id 不应误报');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 十、M2-SPEC §4.2 ⑩：R-04 同时接受两种 ui:// 风格 + R-11 短资源 ID 登记性
+// ════════════════════════════════════════════════════════════════════════════
+//
+// ★ 真实依据（FairyGUI 6.1.4 真实工程，包 mtlga5qj，非推测）★
+//   · 组件内 `<image src>` 引用同包图片用**短资源 ID**：`src="q0jse"`（不带 ui://）；
+//   · Loader 的 `url` / 列表 `defaultItem` 用**拼接无斜杠**：`ui://mtlga5qjls3rcl`。
+//   改前：R-04 自写正则只认 slash，把 `ui://mtlga5qj8yoa8k` 整串当 pkgId（14 位）
+//   → 报「包 id 不是 8 位」+「缺少 itemId」**两个 error**，把合法引用判成错误。
+
+/** 造一个只含 displayList 内容的最小组件 XML。 */
+function wrapDisplayList(lines) {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<component size="480,320" exported="true">',
+    '  <displayList>',
+    ...lines,
+    '  </displayList>',
+    '</component>',
+    '',
+  ].join('\n');
+}
+
+test('★ R-04: concat（拼接无斜杠）引用必须通过 —— 真实工程写法不得被误判成 2 个 error', () => {
+  // 真实样本三形态里可被 R-04 检到的两种（url / defaultItem）
+  const xml = wrapDisplayList([
+    '    <loader id="b00001" name="icon_loader" url="ui://mtlga5qjls3rcl" xy="0,0" size="64,64"/>',
+    '    <list id="b00002" name="cells" xy="0,80" size="200,100" defaultItem="ui://mtlga5qjxqt5f"/>',
+  ]);
+  const r = lintComponentXml(xml, { resources: RESOURCES });
+  const issues = byRule(r, 'R-04');
+  assert.deepEqual(issues, [],
+    `concat 引用不得报 R-04（改前会报 2 个：包 id 14 位 + 缺少 itemId）：${JSON.stringify(issues)}`);
+
+  // 另一种真实写法：14 字符拼接（包 id 8 + itemId 6）
+  const xml2 = wrapDisplayList([
+    '    <loader id="b00001" name="model" url="ui://mtlga5qj8yoa8k" xy="0,0" size="64,64"/>',
+  ]);
+  assert.deepEqual(byRule(lintComponentXml(xml2, { resources: RESOURCES }), 'R-04'), []);
+});
+
+test('★ R-04: slash 形态仍合法（两种风格并存，不互相排斥）', () => {
+  const xml = wrapDisplayList([
+    '    <loader id="b00001" name="model" url="ui://mtlga5qj/8yoa8k" xy="0,0" size="64,64"/>',
+  ]);
+  assert.deepEqual(byRule(lintComponentXml(xml, { resources: RESOURCES }), 'R-04'), []);
+});
+
+test('★ R-04: 包 id 位数错误仍必报（3 位 / 6 位）', () => {
+  const short3 = wrapDisplayList([
+    '    <loader id="b00001" name="model" url="ui://abc/xyz" xy="0,0" size="64,64"/>',
+  ]);
+  const r3 = byRule(lintComponentXml(short3, { resources: RESOURCES }), 'R-04');
+  assert.equal(r3.length, 1, '3 位包 id 必须报');
+  assert.ok(r3[0].message.includes('3 位') && r3[0].message.includes('8 位'));
+
+  // 6 位 + 斜杠：不能被 parseUiRef 的 concat 分支按 8 位硬切而"掩藏"成合法
+  const short6 = wrapDisplayList([
+    '    <loader id="b00001" name="model" url="ui://abc123/xyz" xy="0,0" size="64,64"/>',
+  ]);
+  const r6 = byRule(lintComponentXml(short6, { resources: RESOURCES }), 'R-04');
+  assert.equal(r6.length, 1, '6 位包 id 必须报（不得被 concat 硬切掩藏）');
+  assert.ok(r6[0].message.includes('abc123'));
+});
+
+test('★ R-11: 短资源 ID src 已登记且 type=image → 不报', () => {
+  const xml = wrapDisplayList([
+    '    <image id="b00001" name="mail_bg" src="q0jse" xy="0,0" size="100,50"/>',
+  ]);
+  const r = lintComponentXml(xml, { resources: { q0jse: { w: 100, h: 50, type: 'image' } } });
+  assert.deepEqual(byRule(r, 'R-11'), []);
+});
+
+test('★ R-11: 短资源 ID 未登记 → 报错（丢失的"引用是否存在"保护由本规则补上）', () => {
+  const xml = wrapDisplayList([
+    '    <image id="b00001" name="mail_bg" src="q0jse" xy="0,0" size="100,50"/>',
+  ]);
+  const r = lintComponentXml(xml, { resources: { other_id: { w: 1, h: 1, type: 'image' } } });
+  const issues = byRule(r, 'R-11');
+  assert.equal(issues.length, 1, '未登记的短 ID 必须报');
+  assert.ok(issues[0].message.includes('没有') || issues[0].message.includes('未登记'),
+    `信息应说明未登记: ${issues[0].message}`);
+  assert.equal(issues[0].severity, 'error');
+});
+
+test('★ R-11: 短资源 ID 命中但 type=component → 报「不是图片资源」', () => {
+  const xml = wrapDisplayList([
+    '    <image id="b00001" name="mail_bg" src="q0jse" xy="0,0" size="100,50"/>',
+  ]);
+  const r = lintComponentXml(xml, { resources: { q0jse: { w: 1, h: 1, type: 'component' } } });
+  const issues = byRule(r, 'R-11');
+  assert.equal(issues.length, 1);
+  assert.ok(issues[0].message.includes('不是图片'), `信息应说明不是图片: ${issues[0].message}`);
+});
+
+test('★ R-11: resources 未注入 → 整条规则跳过（不产生噪声）', () => {
+  const xml = wrapDisplayList([
+    '    <image id="b00001" name="mail_bg" src="q0jse" xy="0,0" size="100,50"/>',
+  ]);
+  const r = lintComponentXml(xml, {}); // 无 resources
+  assert.deepEqual(byRule(r, 'R-11'), [], '未注入资源时不得凭空报未登记');
+});
+
+test('★ R-11: src 含 ui:// → 交给 R-04，本规则不重复报', () => {
+  const xml = wrapDisplayList([
+    '    <image id="b00001" name="mail_bg" src="ui://mtlga5qj/a7b8c9d0" xy="0,0" size="100,50"/>',
+  ]);
+  const r = lintComponentXml(xml, { resources: RESOURCES });
+  assert.deepEqual(byRule(r, 'R-11'), [], 'ui:// 形态不由 R-11 处理');
+  assert.deepEqual(byRule(r, 'R-04'), [], 'ui:// 形态由 R-04 校验且合法');
 });

@@ -176,15 +176,15 @@ test('M1 交叉验证一（lint 闭环）: fixture 的规范组件必须过我�
     assert.equal(r.ok, true, `${rel} 应 0 error（fixture 按 STANDARDS 构造）：${JSON.stringify(r.errors)}`);
     assert.equal(r.errors.length, 0);
   }
-  // ★ 已知差异（写进报告，不静默）★：RewardCell 故意用上游 bridge 的**无斜杠
-  //   拼接风格**（plugin_main.js.baseline 的 itemUrl），我们的 lint R-04 按
-  //   STANDARDS 要求斜杠风格，因此会报 R-04 —— 这正是「真实工程可能含遗留
-  //   风格」的形态。indexer 两种都解析（见交叉验证二），lint 是否放宽属
-  //   Q18 系列未决问题，本轮不动 lint 契约。
+  // ★ 契约已修正（M2-SPEC §4.2 ⑩，2026-10-21，依据真实 FairyGUI 6.1.4 工程）★
+  //   真实工程的引用就是**拼接无斜杠**（bridge 的 itemUrl 同款），我们此前把
+  //   「拼接必须报 R-04」钉成差异探针 —— 现按真实证据**翻转**：拼接风格**必须通过**
+  //   （R-04 改用 parseUiRef，两种风格并存）。
+  //   探针作用保留：若有人把 R-04 改回「只认斜杠」，这里会立刻红。
   const cell = lintComponentXml(fs.readFileSync(path.join(FIXTURE, 'assets/MailDetail/RewardCell.xml'), 'utf8'), {});
-  assert.equal(cell.ok, false, '拼接风格按现行 lint 契约应报错（已知差异，勿静默改绿）');
-  assert.ok(cell.errors.some((e) => e.rule === 'R-04' && e.message.includes('ui://e5f6a7b8a7b8c9d0')),
-    '★ 该 R-04 报错应如实存在 —— 它是「上游风格 vs 我们 lint 契约」差异的探针');
+  assert.equal(cell.ok, true, `拼接风格（真实工程写法）必须通过 lint：${JSON.stringify(cell.errors)}`);
+  assert.equal(cell.errors.filter((e) => e.rule === 'R-04').length, 0,
+    '★ R-04 不得再误判 concat 引用（真实工程的合法写法）');
 });
 
 test('M1 交叉验证三（round-trip）: 索引 -> 渲染 -> 再索引结构一致', () => {

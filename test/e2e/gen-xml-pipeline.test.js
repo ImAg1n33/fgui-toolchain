@@ -178,6 +178,11 @@ function runApply(f, extra = []) {
  *
  * ★ 新属性写入顺序是 **字母序**（xml-patcher 既定行为，team-lead 已裁定不改：
  *   字母序与插入序都满足 B9 确定性）—— 故 `alpha` 在 `color` 之前，golden 按现实写。
+ *
+ * ★ 新增节点的 `src` 是**短资源 ID**（M2-SPEC §4.2 ⑧）★
+ *   真实 FairyGUI 6.1.4 工程里，组件内 `<image>` 引用**同包**图片写 `src="q0jse"`
+ *   （即 `package.xml` 的 `resources[].id`，**不带 `ui://`**）。本文件前几行的
+ *   `ui://` 是 fixture 里的**存量节点**（apply 不改写它们），只有**新增**节点用短 ID。
  */
 function expectedGolden() {
   return [
@@ -188,7 +193,7 @@ function expectedGolden() {
     '    <image id="b00001" name="reward_icon" src="ui://e5f6a7b8/a7b8c9d0" xy="24,24" size="96,96"/>',
     '    <text id="b00002" name="title" xy="140,60" size="200,36" text="邮件详情" alpha="0.8" color="#ffd278"/>',
     '    <list id="b00003" name="rewards" xy="24,140" size="312,96" defaultItem="RewardCell" visible="false"/>',
-    '    <image id="b00004" name="reward_icon" src="ui://e5f6a7b8/a7b8c9d0" xy="260,380" size="96,96"/>',
+    '    <image id="b00004" name="reward_icon" src="a7b8c9d0" xy="260,380" size="96,96"/>',
     '  </displayList>',
     '</component>',
     '',
