@@ -51,8 +51,8 @@ function projectIndexFixture(overrides = {}) {
     version: '1.0',
     project: { name: 'MailPopup', packages: [{ name: 'Mail', id: 'e5f6a7b8', relPath: 'assets/Mail' }] },
     resources: [
-      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon', exported: true, width: 96, height: 96 },
-      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0002', name: '未导出图', exported: false, width: 10, height: 10 },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon', exported: 'true', width: 96, height: 96 },
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0002', name: '未导出图', exported: 'false', width: 10, height: 10 },
     ],
     components: [{ pkg: 'Mail', name: 'MailDetail', file: TARGET_FILE, size: [480, 320] }],
     ...overrides,
@@ -226,7 +226,7 @@ test('② 双名映射: 零命中 → unresolved（不阻塞退出码）', () =>
 // ③ ADD
 // ════════════════════════════════════════════════════════════════════════════
 
-test('③ ADD: 资源已登记且 exported → resolved + 正确 src（斜杠风格 + pkgId）', () => {
+test('③ ADD: 资源已登记且 exported="true" → resolved + **短 ID** src（§4.2 ⑧），无未导出告警', () => {
   const { genPlan } = run([
     { op: 'ADD', slot: 'reward_icon', node: 'L017' },
   ], {
@@ -235,11 +235,15 @@ test('③ ADD: 资源已登记且 exported → resolved + 正确 src（斜杠风
   const e = genPlan.entries[0];
   assert.equal(e.status, STATUS.RESOLVED, `note=${e.note}`);
   assert.equal(e.patch.tag, 'image');
-  assert.equal(e.patch.attrs.src, 'ui://e5f6a7b8/r0001', '★ ui:// 用斜杠风格 + 包 id');
+  // ★ 真实工程（FairyGUI 6.1.4）：组件内 <image> 引用同包图片用**短资源 ID**
+  assert.equal(e.patch.attrs.src, 'r0001', '★ src 必须是 resources[].id 短 ID');
+  assert.ok(!String(e.patch.attrs.src).includes('ui://'), '★ <image src> 绝不带 ui://');
   assert.equal(e.patch.attrs.xy, '260,380');
   assert.equal(e.patch.attrs.size, '96,96');
   assert.equal(e.patch.after, null, 'ADD 追加末尾');
   assert.ok(e.patch.attrs.id, '应分配 id');
+  assert.ok(!genPlan.warnings.some((w) => w.code === 'RESOURCE_NOT_EXPORTED_SAME_PKG'),
+    '★ exported="true" 不应出未导出告警');
 });
 
 test('③ ADD: 资源未登记 → blocked，note 含 package.xml 字样', () => {
@@ -269,7 +273,7 @@ test('③ ADD: 资源名带扩展名（真实 fixture 形态）→ 归一化后�
   });
   const e = genPlan.entries[0];
   assert.equal(e.status, STATUS.RESOLVED, `带扩展名的资源名应能匹配，note=${e.note}`);
-  assert.equal(e.patch.attrs.src, 'ui://e5f6a7b8/r0001');
+  assert.equal(e.patch.attrs.src, 'r0001', '短 ID（§4.2 ⑧）');
 });
 
 test('③ ADD: 大小写差异的资源名归一化匹配（popup_bg.PNG ↔ popup_bg）', () => {
@@ -433,7 +437,7 @@ test('★ P1-2-A: 同名 component + image → 必须绑到 image（原来会绑
     targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
   });
   assert.equal(genPlan.entries[0].status, STATUS.RESOLVED);
-  assert.equal(genPlan.entries[0].patch.attrs.src, 'ui://e5f6a7b8/aaaa0001');
+  assert.equal(genPlan.entries[0].patch.attrs.src, 'aaaa0001', '短 ID（绑到 image 那条）');
 });
 
 test('★ P1-2-A2: 同名只有非图片类型 → blocked + ADD_RESOURCE_TYPE_MISMATCH（不静默落到 NONE）', () => {
@@ -482,20 +486,8 @@ test('★ P1-2 正例保留: reward_icon ↔ reward_icon.png 命中；图层249 
   assert.equal(h2.match.id, 'r0007', '绑正本');
 });
 
-test('③ ADD: exported=false 的资源 → blocked，且用 NOT_EXPORTED 专属 code（不是「未登记」）', () => {
-  const { genPlan } = run([
-    { op: 'ADD', slot: '未导出图', node: 'L017' },
-  ], {
-    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
-  });
-  assert.equal(genPlan.entries[0].status, STATUS.BLOCKED);
-  assert.ok(genPlan.entries[0].note.includes('exported'));
-  // ★ 与「未登记」区分：行动不同（标成导出 vs 导入素材）
-  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_EXPORTED'),
-    '未导出的资源应报 ADD_RESOURCE_NOT_EXPORTED');
-  assert.ok(!genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_REGISTERED'),
-    '不应误报为「未登记」（资源其实登记了）');
-});
+// （v0.3 ⑨ 起：exported="false" 的同包图片**放行 + 告警**，不再 blocked。
+//   见下方「★ v0.3 ⑨-2」用例 —— 原「blocked + ADD_RESOURCE_NOT_EXPORTED」用例已随之退场。）
 
 test('③ ADD: 无 target-ir → blocked（且不发生 id 分配）', () => {
   const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }]);
@@ -531,87 +523,117 @@ test('③ ADD: smartobject → blocked（有 note，不静默）', () => {
   assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_SMARTOBJECT'));
 });
 
-test('② ADD: pkgId 缺失 → **blocked**（不降级生成无效 ui://），PKGID_MISSING 保留', () => {
-  // ★ 行为变更（外部审查 P1，team-lead 采纳）：原实现按包名降级生成
-  //   `ui://<pkgName>/<id>` —— 那等于生成一个大概率无效的引用（与 BUG-A 同性质：
-  //   静默生成无效内容）。现改为 blocked，条目不可执行。
+test('★ v0.3 ⑧: pkgId 缺失**不再影响** `<image src>`（短 ID 不需要包 id）', () => {
+  // §4.2 ⑧ 让 <image src> 改为同包短资源 ID，因此「包 id 未知」这个前置条件
+  // 自然退场：上一轮为「不降级生成 ui://」而设的 blocked 也随之一并撤销
+  // （否则会变成**假阻断**：明明能生成合法短 ID 却被拦住）。
   const idx = projectIndexFixture({
     project: { name: 'MailPopup', packages: [{ name: 'Mail', id: null, relPath: 'assets/Mail' }] },
-    resources: [{ pkg: 'Mail', pkgId: null, type: 'image', id: 'r0001', name: 'reward_icon', exported: true }],
+    resources: [{ pkg: 'Mail', pkgId: null, type: 'image', id: 'r0001', name: 'reward_icon', exported: 'true' }],
   });
   const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
     projectIndex: idx,
     targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
   });
   const e = genPlan.entries[0];
-  assert.equal(e.status, STATUS.BLOCKED, '★ 缺包 id 时必须 blocked（不得降级生成 src）');
-  assert.equal(e.patch, null, '★ 不得产出 patch（否则会写出无效 ui:// 引用）');
-  assert.ok(e.note.includes('包 id'), 'note 应点明「包 id 无法确定」');
-  assert.ok(e.note.includes('不降级') || e.note.includes('无法构造合法'), 'note 应说明为何不降级');
-  const w = genPlan.warnings.find((x) => x.code === 'PKGID_MISSING');
-  assert.ok(w, '★ PKGID_MISSING 告警保留（说明被阻塞的原因）');
-  assert.ok(/blocked/.test(w.msg), 'warning 应说明已 blocked');
+  assert.equal(e.status, STATUS.RESOLVED, '短 ID 引用不依赖 pkgId，应 resolved');
+  assert.equal(e.patch.attrs.src, 'r0001');
+  assert.ok(!genPlan.warnings.some((w) => w.code === 'PKGID_MISSING'),
+    'PKGID_MISSING 已随 ui:// 生成一起退场');
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// ① BUG-A：exported 判定（字符串 "false" 不许当真值）
+// v0.3 ⑨：exported 按引用场景判定（同包放行 + 告警）
 // ════════════════════════════════════════════════════════════════════════════
 
-test('★ BUG-A: exported="false" 的资源不得被绑定 → not_exported + blocked', () => {
-  // 根因：package-indexer 产出的 exported **永远是字符串**（"true"/"false"/null），
-  //   原实现用真值判断 → Boolean("false") === true → 未导出的资源被静默绑定。
+test('★ v0.3 ⑨-1: 同包图片 exported **缺失** → resolved + 短 ID + RESOURCE_NOT_EXPORTED_SAME_PKG', () => {
+  // 真实工程证据：11/27 张图没有 exported 属性，却在被同包组件正常引用。
+  const idx = projectIndexFixture({
+    resources: [
+      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'q0jse', name: 'reward_icon.png' }, // 无 exported
+    ],
+  });
+  const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const e = genPlan.entries[0];
+  assert.equal(e.status, STATUS.RESOLVED, '★ 同包引用不依赖导出标志，必须放行');
+  assert.equal(e.patch.attrs.src, 'q0jse');
+  assert.ok(!String(e.patch.attrs.src).includes('ui://'), '★ <image src> 绝不带 ui://');
+  const w = genPlan.warnings.find((x) => x.code === 'RESOURCE_NOT_EXPORTED_SAME_PKG');
+  assert.ok(w, '★ 必须发 RESOURCE_NOT_EXPORTED_SAME_PKG（提示而非阻断）');
+  assert.ok(/同包/.test(w.msg) && /exported/.test(w.msg), 'warning 应说明同包引用与导出标志的关系');
+  assert.ok(e.note.includes('跨包'), 'note 应提示「如需跨包公开引用请先标 exported="true"」');
+});
+
+test('★ v0.3 ⑨-2: exported="false" 也放行，但必须告警（这条能抓住真值判断回归）', () => {
+  // ★ 关键反向验证 ★：若 isExported 被改回真值判断（Boolean('false')===true），
+  //   本用例的 warning 断言会立刻变红。这是唯一能抓住该回归的用例
+  //   （缺失/ null 情形用真值判断也得 false，抓不住）。
   const idx = projectIndexFixture({
     resources: [
       { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: 'false' },
     ],
   });
-  const hit = findExportedResource(idx, 'Mail', ['reward_icon']);
-  assert.equal(hit.status, 'not_exported', '★ 字符串 "false" 必须判为未导出');
-  assert.equal(hit.match, null, '★ 绝不绑定未导出的资源（否则贴图丢失且无报错）');
-  assert.deepEqual(hit.candidates, ['reward_icon.png'], '应报出「对得上但未导出」的候选');
-
   const { genPlan } = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
     projectIndex: idx,
     targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
   });
   const e = genPlan.entries[0];
-  assert.equal(e.status, STATUS.BLOCKED);
-  assert.equal(e.patch, null);
-  assert.ok(/exported/.test(e.note), '★ note 必须含 exported 字样（区分于「未登记」）');
-  assert.ok(e.note.includes('标成导出'), 'note 应给出行动：去 package.xml 标成导出');
-  assert.ok(genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_EXPORTED'),
-    '★ 必须用独立的 ADD_RESOURCE_NOT_EXPORTED（与「未登记」的 code 分开）');
+  assert.equal(e.status, STATUS.RESOLVED, '同包引用仍放行（不阻断）');
+  assert.equal(e.patch.attrs.src, 'r0001');
+  assert.ok(genPlan.warnings.some((w) => w.code === 'RESOURCE_NOT_EXPORTED_SAME_PKG'),
+    '★ exported="false" 必须告警（真值判断会吞掉它）');
+  assert.ok(!genPlan.warnings.some((w) => w.code === 'ADD_RESOURCE_NOT_EXPORTED'),
+    '旧的阻断型告警已退场');
 });
 
-test('★ BUG-A: exported="true" 仍正常解析；exported=null 视同未导出', () => {
+test('★ v0.3 ⑨-3: exported="true" → 无告警；exported=null → 放行但告警', () => {
   const ok = projectIndexFixture({
     resources: [
       { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: 'true' },
     ],
   });
-  assert.equal(findExportedResource(ok, 'Mail', ['reward_icon']).status, 'normalized',
-    '字符串 "true" 必须视为已导出');
   const p = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
     projectIndex: ok,
     targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
   });
   assert.equal(p.genPlan.entries[0].status, STATUS.RESOLVED);
-  assert.equal(p.genPlan.entries[0].patch.attrs.src, 'ui://e5f6a7b8/r0001');
+  assert.equal(p.genPlan.entries[0].patch.attrs.src, 'r0001');
+  assert.ok(!p.genPlan.warnings.some((w) => w.code === 'RESOURCE_NOT_EXPORTED_SAME_PKG'),
+    'exported="true" 不应告警');
 
   const nul = projectIndexFixture({
     resources: [
       { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'reward_icon.png', exported: null },
     ],
   });
-  assert.equal(findExportedResource(nul, 'Mail', ['reward_icon']).status, 'not_exported',
-    'exported=null 视同未导出');
+  const q = run([{ op: 'ADD', slot: 'reward_icon', node: 'L017' }], {
+    projectIndex: nul,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  assert.equal(q.genPlan.entries[0].status, STATUS.RESOLVED, 'null 也放行（同包）');
+  assert.ok(q.genPlan.warnings.some((w) => w.code === 'RESOURCE_NOT_EXPORTED_SAME_PKG'),
+    'null 应告警（exported !== "true"）');
 });
 
-test('★ BUG-A 反向验证: 真值判断会放行 "false"（证明 isExported 是必需的）', () => {
-  // 这条测试是「测试能真失败」的证明：
-  //   若把 isExported 改回真值判断（`r.exported`），上面两条会立刻变红。
-  //   这里额外把陷阱本身钉死 —— 后人读到这里就知道为什么不能用真值。
-  assert.equal(Boolean('false'), true, '★ 陷阱：Boolean("false") === true（真值判断会放行未导出资源）');
+test('★ v0.3 反向验证: src 退回 ui:// / isExported 退回真值 → 必红', () => {
+  // ① src 契约：任何图片 ADD 的 src 都必须是纯短 ID（无 "ui://"、无 "/"）
+  const idx = projectIndexFixture({
+    resources: [{ pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'q0jse', name: 'bg.png' }],
+  });
+  const { genPlan } = run([{ op: 'ADD', slot: 'bg', node: 'L017' }], {
+    projectIndex: idx,
+    targetIr: irFixture([{ id: 'L017', type: 'raster', bbox: { x: 0, y: 0, w: 10, h: 10 } }]),
+  });
+  const src = genPlan.entries[0].patch.attrs.src;
+  assert.equal(src, 'q0jse');
+  assert.ok(!src.includes('ui://') && !src.includes('/'),
+    '★ 若有人把 src 改回 `ui://<pkgId>/<id>`，本断言立刻红');
+
+  // ② isExported 真值表（防「字符串 false 当真值」回归）
+  assert.equal(Boolean('false'), true, '★ 陷阱：Boolean("false") === true');
   assert.equal(isExported('false'), false, 'isExported 必须拒绝字符串 "false"');
   assert.equal(isExported('true'), true);
   assert.equal(isExported(true), true, '布尔 true 也接受（防御手工构造的 index）');
@@ -619,14 +641,13 @@ test('★ BUG-A 反向验证: 真值判断会放行 "false"（证明 isExported 
   assert.equal(isExported(undefined), false);
   assert.equal(isExported(''), false);
   assert.equal(isExported(1), false, '数字 1 不是合法表示（index 只产出字符串/布尔）');
-  // 端到端口径：字符串 "false" 的资源绝不可出现在「已导出」列表里
-  const idx = projectIndexFixture({
-    resources: [
-      { pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'hidden.png', exported: 'false' },
-    ],
+
+  // ③ 本包图片清单不再按 exported 过滤（同包引用不依赖它）
+  const hidden = projectIndexFixture({
+    resources: [{ pkg: 'Mail', pkgId: 'e5f6a7b8', type: 'image', id: 'r0001', name: 'hidden.png', exported: 'false' }],
   });
-  assert.deepEqual(listExportedImageNames(idx, 'Mail'), [],
-    '★ 未导出的资源不得出现在「已导出图片」列表（否则 note 会误导人）');
+  assert.deepEqual(listExportedImageNames(hidden, 'Mail'), ['hidden.png'],
+    '★ 未导出的同包图也应列入清单（否则 blocked 提示会误导人去导入已有的图）');
 });
 
 // ════════════════════════════════════════════════════════════════════════════

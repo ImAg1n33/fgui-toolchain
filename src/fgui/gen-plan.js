@@ -672,22 +672,32 @@ const RESOURCE_MATCH = Object.freeze({
   EXACT: 'exact',           // 按 id 或 name 精确全等，**且唯一**命中
   NORMALIZED: 'normalized', // 归一化后**唯一**全等命中
   AMBIGUOUS: 'ambiguous',   // 多候选（精确或归一）—— 不猜，交人
-  TYPE_MISMATCH: 'type_mismatch', // 名字/id 对得上、也已导出，但**类型不是图片**
-  NOT_EXPORTED: 'not_exported', // 名字/id 对得上，但 exported 不是 true —— 不绑定
-  NONE: 'none',             // 未登记
+  TYPE_MISMATCH: 'type_mismatch', // 名字/id 对得上，但**类型不是图片**
+  NONE: 'none',             // 未登记（目标包里没有任何同名/同 id 资源）
+  // ⚠ `NOT_EXPORTED` 已于 v0.3 移除（M2-SPEC §4.2 ⑨）。
+  //   原因：同包引用（短 ID `src`）**不依赖 exported 标志** —— 真实工程里
+  //   11/27 张图根本没有 exported 属性却在被正常引用。故"未导出"不再是
+  //   一种**匹配失败**，而是匹配成功后的**提示**（`RESOURCE_NOT_EXPORTED_SAME_PKG`）。
+  //   若将来实现跨包 `ui://` 引用（要求 exported==='true'），应新增独立状态与
+  //   独立的匹配入口，而不是把这条复活 —— 两个场景的判定依据不同。
 });
 
 /**
- * 在目标包的资源里匹配图片（D3）。
+ * 在目标包的资源里匹配**可被节点引用的图片**（D3 / M2-SPEC §4.2 ⑧⑨）。
  *
- * ★ 五条纪律（防「静默绑错资源」；P1-2 修复后）★
+ * ★ 六条纪律（防「静默绑错资源」）★
  *   0. **类型限定**：图片 ADD 只允许匹配 `type === 'image'` 的资源 ——
  *      否则会同名绑到 component 等**非图片**资源，生成指向错误东西的 `src`；
+ *   0b. **不按 exported 过滤**（§4.2 ⑨）：同包引用是短 ID，不依赖导出标志；
+ *      `exported !== 'true'` 由调用方转为 **warning**（不是阻断）；
  *   1. **按 id 精确唯一**：恰好 1 条才 resolve，>1 条（理论不该发生）交人；
  *   2. **按 name 精确唯一**：恰好 1 条才 resolve，**>1 条 → ambiguous（绝不取第一个）**；
  *   3. **归一化兜底唯一**：去扩展名/大小写/繁简后全等，只在一个候选时绑定；
- *   4. **未命中要能区分原因**：类型不符 / 未导出 / 未登记 —— 三者给用户的行动不同。
+ *   4. **未命中要能区分原因**：类型不符 / 未登记 —— 两者给用户的行动不同。
  *   全程**不做前缀/子串匹配**（K5）。
+ *
+ * 函数名沿用 `findExportedResource`（外部脚本/测试已引用，改名会制造无谓 churn），
+ * 但语义已从「找已导出资源」变为「找本包内可引用的图片资源」。
  *
  * @param {Object} projectIndex
  * @param {string} targetPkg
@@ -706,7 +716,8 @@ function findExportedResource(projectIndex, targetPkg, keys, normOpts, opts) {
 
   const allInPkg = res.filter((r) => r && r.pkg === targetPkg);
   // ★ 类型限定：图片只能匹配图片（否则会绑到同名 component 等）★
-  const inPkg = allInPkg.filter((r) => isExported(r.exported) && r.type === wantType);
+  // ★ 刻意**不**按 isExported 过滤（§4.2 ⑨）：同包短 ID 引用不依赖导出标志 ★
+  const inPkg = allInPkg.filter((r) => r.type === wantType);
 
   const label = (r) => `${r.name}#${r.id}`;
   const ambiguousOf = (hits) => ({
@@ -735,31 +746,32 @@ function findExportedResource(projectIndex, targetPkg, keys, normOpts, opts) {
   }
   if (normHits.length > 1) return ambiguousOf(normHits);
 
-  // ④ 未命中 —— 区分原因（类型不符 / 未导出 / 未登记），三者行动不同
+  // ④ 未命中 —— 区分原因（类型不符 / 未登记）：两者给用户的行动不同
+  //    ⚠「未导出」不再是一种未命中（§4.2 ⑨）：未导出的图**能**被同包引用，
+  //      它会在 ①②③ 里正常命中，随后由调用方发 warning。
   const nameOrIdLike = (r) => wanted.includes(r.name) || wanted.includes(String(r.id))
     || (r.name && wantedNorm.has(normalizeName(String(r.name), nopts)));
   const matched = allInPkg.filter(nameOrIdLike);
-  // ④-a 名字对得上、已导出，但类型不是图片（P1-2 问题 A 的可操作信号）
-  const wrongType = matched.filter((r) => isExported(r.exported) && r.type !== wantType);
-  if (wrongType.length) {
+  // ④-a 名字对得上，但**没有任何一条是图片** → 类型不符（可操作信号）
+  const wrongType = matched.filter((r) => r.type !== wantType);
+  if (wrongType.length && wrongType.length === matched.length) {
     return {
       match: null,
       status: RESOURCE_MATCH.TYPE_MISMATCH,
       candidates: wrongType.map((r) => `${r.name}(type=${r.type === undefined ? '??' : r.type})`),
     };
   }
-  // ④-b 名字对得上但未导出
-  const notExported = matched.filter((r) => !isExported(r.exported));
-  if (notExported.length) {
-    return {
-      match: null, status: RESOURCE_MATCH.NOT_EXPORTED, candidates: notExported.map((r) => String(r.name || r.id)),
-    };
-  }
   return { match: null, status: RESOURCE_MATCH.NONE, candidates: [] };
 }
 
 /**
- * 列出目标包内已导出的图片名（供 blocked 时给出可操作信息，不参与匹配）。
+ * 列出目标包内的图片资源名（供 blocked 时给出可操作信息，不参与匹配）。
+ *
+ * v0.3 起**不再按 exported 过滤**（§4.2 ⑨）：同包引用不依赖导出标志，
+ * 所以「本包已有什么图」应当把所有图片都列出来，否则会误导人。
+ *
+ * 函数名沿用 `listExportedImageNames`（外部脚本已引用）；语义为「本包图片名清单」。
+ *
  * @param {Object} projectIndex
  * @param {string} targetPkg
  * @param {number} [limit=8]
@@ -769,8 +781,7 @@ function listExportedImageNames(projectIndex, targetPkg, limit) {
   const res = Array.isArray(projectIndex && projectIndex.resources) ? projectIndex.resources : [];
   const max = Number.isFinite(limit) ? limit : 8;
   const names = res
-    // ★ BUG-A：同 isExported（勿改回真值判断）★
-    .filter((r) => r && r.pkg === targetPkg && isExported(r.exported) && r.type === 'image' && r.name)
+    .filter((r) => r && r.pkg === targetPkg && r.type === 'image' && r.name)
     .map((r) => String(r.name));
   const shown = names.slice(0, max);
   return names.length > max ? [...shown, `…(共 ${names.length} 个)`] : shown;
@@ -783,10 +794,15 @@ function listExportedImageNames(projectIndex, targetPkg, limit) {
  *   · 无 --target-ir（或 node 不在 target-ir）→ 无 bbox/type/text 可依；
  *   · type=smartobject → 无对应节点类型；
  *   · image 资源**未登记** → 先导入素材并登记 package.xml（`ADD_RESOURCE_NOT_REGISTERED`）；
- *   · image 资源**已登记但未 exported** → 去 package.xml 标成导出（`ADD_RESOURCE_NOT_EXPORTED`，BUG-A）；
  *   · image 资源**同名但类型不是图片** → 确认素材类型/导入正确图片（`ADD_RESOURCE_TYPE_MISMATCH`，P1-2）；
  *   · image 资源**多候选**（精确或归一后同名/id 相撞）→ 不猜（`ADD_RESOURCE_AMBIGUOUS`，P1-2）；
- *   · **包 id 无法确定** → 不降级生成无效 `ui://`（`PKGID_MISSING`）。
+ *   · 匹配资源**缺 id** → 无法构成短 ID 引用（`ADD_RESOURCE_NO_ID`）。
+ *
+ * 已退场的规则（v0.3，M2-SPEC §4.2 ⑨）：
+ *   · 「未 exported 一律 blocked」**已撤销** —— 同包短 ID 引用不依赖导出标志，
+ *     改为 warning `RESOURCE_NOT_EXPORTED_SAME_PKG`；
+ *   · 「pkgId 缺失 → blocked」**已自然退场** —— `<image src>` 不再用 `ui://`，
+ *     不再需要包 id（`target.pkgId` 仍作为信息输出）。
  * 本工具**永不自动修改** package.xml（PRD R4-F6）。
  *
  * @param {Object} a
@@ -830,18 +846,21 @@ function classifyAdd(a, entry) {
 
   // ---- 图片资源解析（仅 image）----
   const attrs = {};
+  /** 人可读说明（跨分支累积，最后拼进 entry.note）。 */
+  const notes = [];
   if (tag === 'image') {
     const keys = [entry.slot, diff.normName, diff.baseName].filter((k) => typeof k === 'string' && k);
     // ADD 的是图片 → 只允许匹配 type==='image' 的资源（P1-2 问题 A）
     const hit = findExportedResource(projectIndex, targetPkg, keys, a.normOpts, { type: 'image' });
     if (!hit.match) {
-      // ★ blocked 也要可操作：列出目标包内已导出的图片名（纯信息，不参与匹配）★
+      // ★ blocked 也要可操作：列出目标包内的图片名（纯信息，不参与匹配）★
       const available = listExportedImageNames(projectIndex, targetPkg);
       const keysText = JSON.stringify(keys.filter(Boolean));
-      // ★ 三种失败必须分开（给用户的行动不同，且都不许静默）★
-      //   ambiguous    → 工程里有多个同名资源，不猜
-      //   not_exported → 已登记但 exported≠"true"（画师刻意不发布）→ 去 package.xml 标成导出
-      //   none         → 未登记 → 先导入素材
+      // ★ 两种失败必须分开（行动不同，且都不许静默）★
+      //   ambiguous → 多个同名资源，不猜
+      //   type_mismatch → 同名条目存在但不是图片
+      //   none → 未登记 → 先导入素材
+      //   （「未导出」v0.3 起**不是**失败：同包短 ID 引用不依赖导出标志，见 §4.2 ⑨）
       const status = hit.status;
       const candText = hit.candidates.length ? `（${hit.candidates.join(', ')}）` : '';
       entry.status = STATUS.BLOCKED;
@@ -853,55 +872,58 @@ function classifyAdd(a, entry) {
         entry.note = `图片资源 ${keysText} 在目标包 package.xml 里有同名条目，但**类型不是图片**${candText}`
           + ' —— ADD 的是图片节点，不能引用非图片资源。'
           + '请确认素材类型是否正确，或导入正确的图片资源后重跑 prepare';
-      } else if (status === RESOURCE_MATCH.NOT_EXPORTED) {
-        entry.note = `图片资源 ${keysText} 已登记在目标包 package.xml 中${candText}，但 **exported 不是 "true"**`
-          + '（画师刻意未导出）—— 本工具不会引用未导出的资源。'
-          + '请先把该资源在 package.xml 里标成导出（exported="true"）后重跑 prepare'
-          + '（本工具**永不自动修改** package.xml，PRD R4-F6）';
       } else {
         entry.note = `图片资源 ${keysText} 未在目标包 package.xml 中登记`
           + ' —— 需先导入素材并登记 package.xml（本工具**永不自动修改** package.xml，PRD R4-F6），'
           + '登记后重跑 prepare'
           + (available.length
-            ? `。目标包内已导出的图片：${available.join(', ')}（如目标资源已在此列，请把 change_plan 的 slot 改成与资源名一致）`
-            : '。目标包内当前**没有任何**已导出的图片资源');
+            ? `。目标包内的图片：${available.join(', ')}（如目标资源已在此列，请把 change_plan 的 slot 改成与资源名一致）`
+            : '。目标包内当前**没有任何**图片资源');
       }
       warnings.push({
         code: status === RESOURCE_MATCH.AMBIGUOUS ? 'ADD_RESOURCE_AMBIGUOUS'
           : status === RESOURCE_MATCH.TYPE_MISMATCH ? 'ADD_RESOURCE_TYPE_MISMATCH'
-            : status === RESOURCE_MATCH.NOT_EXPORTED ? 'ADD_RESOURCE_NOT_EXPORTED'
-              : 'ADD_RESOURCE_NOT_REGISTERED',
+            : 'ADD_RESOURCE_NOT_REGISTERED',
         op: 'ADD', slot: entry.slot, node: entry.node,
         msg: status === RESOURCE_MATCH.AMBIGUOUS
           ? `ADD 条目 slot='${entry.slot}' 命中多个同名资源${candText}—— 不猜，已 blocked`
           : status === RESOURCE_MATCH.TYPE_MISMATCH
             ? `ADD 条目 slot='${entry.slot}' 的同名资源不是图片类型${candText}，已 blocked`
-            : status === RESOURCE_MATCH.NOT_EXPORTED
-              ? `ADD 条目 slot='${entry.slot}' 的资源未 exported（package.xml 里 exported≠"true"），已 blocked`
-              : `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
+            : `ADD 条目 slot='${entry.slot}' 的资源未登记（需先登记 package.xml），已 blocked`,
       });
       return entry;
     }
     const res = hit.match;
-    const pkgId = a.pkgId;
-    // ★ 包 id 无法确定时**不许降级生成**（外部审查 P1，team-lead 已采纳）★
-    //   原来按包名降级生成 `ui://<pkgName>/<id>` —— 那等于**生成一个大概率无效的
-    //   引用**（与 BUG-A 同性质：静默生成无效内容）。且 ui:// 的真实写法
-    //   （斜杠风格 vs Bridge 拼接风格）尚未与真实工程对账，生成什么都只能算猜。
-    //   故改为 blocked：不构造 src，条目不可执行，PKGID_MISSING 保留说明原因。
-    if (!pkgId) {
+    // ★ M2-SPEC §4.2 ⑧：组件内 `<image>` 引用**同包**图片用**短资源 ID**
+    //   （真实工程：`src="q0jse"` = package.xml 里该 image 的 id）。
+    //   **不用 `ui://`** —— ui:// 只出现在 Loader 的 url / 列表 defaultItem /
+    //   字体 font，且真实形态是**拼接无斜杠**；`<image src>` 从不使用它。
+    //   `findExportedResource` 只匹配同包资源，故此引用恒为同包，短 ID 足够。
+    if (!res.id) {
+      // 资源没有 id 就无法构成短 ID 引用 —— 绝不写出 src="undefined"
       entry.status = STATUS.BLOCKED;
-      entry.note = `目标包 '${targetPkg}' 的包 id 无法确定（package.xml 里取不到 pkgId）`
-        + ' —— 缺包 id 无法构造合法的 ui:// 引用，**不降级猜测生成**。'
-        + '请确认 package.xml 中包 id 的落盘位置（Q3 缺口，需真实工程副本对账）后重跑 prepare';
+      entry.note = `图片资源 ${JSON.stringify(keys.filter(Boolean))} 在 project_index 里**没有 id**`
+        + ' —— 短 ID 引用依赖 resources[].id，缺失时无法生成合法 src。'
+        + '请检查 project-index 产物（package.xml 里该图片是否登记了 id）后重跑 prepare';
       warnings.push({
-        code: 'PKGID_MISSING', op: 'ADD', slot: entry.slot, node: entry.node,
-        msg: `ADD 条目 slot='${entry.slot}' 因目标包 '${targetPkg}' 缺 pkgId 被 blocked`
-          + '（不降级生成 ui:// 引用，避免生成无效引用）',
+        code: 'ADD_RESOURCE_NO_ID', op: 'ADD', slot: entry.slot, node: entry.node,
+        msg: `ADD 条目 slot='${entry.slot}' 的匹配资源缺 id，无法生成短 ID src，已 blocked`,
       });
       return entry;
     }
-    attrs.src = `ui://${pkgId}/${res.id}`;
+    attrs.src = String(res.id);
+    // ★ §4.2 ⑨：同包引用不依赖 exported；但 exported !== 'true' 要给 warning
+    //   （真实工程 11/27 张图无该属性却在被引用；显式 "false" 为 0 处）。
+    if (!isExported(res.exported)) {
+      warnings.push({
+        code: 'RESOURCE_NOT_EXPORTED_SAME_PKG', op: 'ADD', slot: entry.slot, node: entry.node,
+        msg: `ADD 条目 slot='${entry.slot}' 引用的同包图片 exported 不是 "true"`
+          + '（缺失或 false）—— 同包引用不依赖导出标志，已按真实工程证据放行；'
+          + '如需跨包公开引用请先标 exported="true"',
+      });
+      notes.push('同包引用不依赖导出标志，已按真实工程证据放行；'
+        + '如需跨包公开引用请先标 exported="true"');
+    }
   }
 
   // ---- 属性：id / name / xy / size / text / color / alpha ----
@@ -912,7 +934,7 @@ function classifyAdd(a, entry) {
   if (xy) attrs.xy = xy;
   if (size) attrs.size = size;
 
-  const notes = [];
+  // （notes 已在上方声明，图片分支可能已推入「同包未导出」说明）
   if (layer.type === 'text' && layer.text && typeof layer.text === 'object') {
     if (typeof layer.text.value === 'string') attrs.text = layer.text.value;
     const color = layer.text.color;
