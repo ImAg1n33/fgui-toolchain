@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { makeFguiProject } = require('../fixtures/make-fgui-project');
-const { runDryrun, sha256 } = require('../../src/fgui/gen-dryrun');
+const { runDryrun, sha256, buildLintResources } = require('../../src/fgui/gen-dryrun');
 
 const ROOT = path.resolve(__dirname, '../..');
 const FIXTURE = path.join(ROOT, 'test/fixtures/fgui-project');
@@ -303,4 +303,25 @@ test('dryrun: REUSE（resolved + patch:null）是空操作，不抛错、不改�
   assert.equal(r2.exitCode, 0);
   assert.equal(r2.report.summary.entriesNoop, 1);
   assert.deepEqual(r2.report.errors, []);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+test('buildLintResources: 带 type（R-11 需要），且无尺寸的登记项（component）不被丢弃', () => {
+  const map = buildLintResources({
+    resources: [
+      {
+        pkgId: 'e5f6a7b8', id: 'a7b8c9d0', name: 'reward_icon.png', type: 'image', width: 96, height: 96,
+      },
+      {
+        pkgId: 'e5f6a7b8', id: 'f6a7b8c9', name: 'MailDetail', type: 'component', width: null, height: null,
+      },
+    ],
+  });
+  // 图片：带尺寸 + type
+  assert.equal(map.a7b8c9d0.type, 'image');
+  assert.equal(map.a7b8c9d0.w, 96);
+  assert.equal(map.a7b8c9d0.h, 96);
+  // 组件：无尺寸但**仍登记**（否则 R-11 只会说"未登记"，说不出"不是图片"）
+  assert.equal(map.f6a7b8c9.type, 'component');
+  assert.equal(map.f6a7b8c9.w, undefined, '无尺寸条目不得伪造 w');
 });

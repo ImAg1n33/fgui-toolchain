@@ -85,10 +85,15 @@ function collectTargets(genPlan) {
  *
  * 对每条资源同时给出两个 key：`ui://<pkgId>/<id>`（优先）与 `ui://<pkgId>/<name>`；
  * 再补裸 `id` / 裸 `name`（覆盖 lint 的 lookupResource「退化为末段名」路径）。
- * width/height 任一为 null 的条目跳过。
+ *
+ * ★ 不再因为 width/height 为 null 就整条跳过（决策 3）★
+ *   component 资源天然没有尺寸，但它是**合法登记**：R-11 需要据此判
+ *   「这个短 ID 指向的是 component 而不是图片」。缺尺寸的条目只带 `type`，
+ *   R-05/R-10 会因为 `!Number.isFinite(info.w)` / `!info.features` 按既有逻辑
+ *   计入 sizeUnknown / noFeatures（有 notes，非静默）。
  *
  * @param {Object} projectIndex
- * @returns {Object<string,{w:number,h:number}>}
+ * @returns {Object<string,{w?:number,h?:number,type?:string}>}
  */
 function buildLintResources(projectIndex) {
   const map = {};
@@ -97,14 +102,22 @@ function buildLintResources(projectIndex) {
     if (!r) continue;
     const w = numOrNull(r.width);
     const h = numOrNull(r.height);
-    if (w === null || h === null) continue;
     const pkgId = r.pkgId || r.packageId || null;
     const id = r.id || null;
     const name = r.name || null;
-    if (pkgId && id) map[`ui://${pkgId}/${id}`] = { w, h };
-    if (pkgId && name) map[`ui://${pkgId}/${name}`] = { w, h };
-    if (id) map[id] = { w, h };
-    if (name) map[name] = { w, h };
+    // ★ 必须带上 type（决策 3）★：R-11 要判「短 ID 命中的是不是图片资源」。
+    //   只给 {w,h} 时那条检查在生产路径上是装饰性的（单测能测、真跑不生效）。
+    //   ★ 但**不能整体跳过没有尺寸的条目**（component 没有 width/height）★：
+    //   否则 R-11 会说「未登记」而不是「引用的不是图片」。故：
+    //     · 有尺寸 → { w, h, type }；R-05/R-10 照旧可用；
+    //     · 无尺寸 → { type }（仍是一次合法的"登记"）；R-05/R-10 会因缺 w/h
+    //       而按既有逻辑计入 sizeUnknown / noFeatures（有 notes，非静默）。
+    const entry = { type: r.type };
+    if (w !== null && h !== null) { entry.w = w; entry.h = h; }
+    if (pkgId && id) map[`ui://${pkgId}/${id}`] = entry;
+    if (pkgId && name) map[`ui://${pkgId}/${name}`] = entry;
+    if (id) map[id] = entry;
+    if (name) map[name] = entry;
   }
   return map;
 }
@@ -364,8 +377,11 @@ function runDryrun(input = {}) {
   const pushFatal = (msg) => { topErrors.push(msg); hadFatal = true; };
   /** @type {Object[]} 顶层非致命告警（如 lint 资源注入表为空 —— D9 防静默降级） */
   const reportWarnings = [];
-  /** resources 注入表是否为空（空则 R-05/R-10 会降级，需告警） */
-  const resourcesEmpty = Object.keys(lintResources).length === 0;
+  /** resources 注入表是否"没有可测量的资源"（D9）：
+   *  空表，或虽有登记但没有任何条目带可用宽高（典型成因：project-index 带 --no-images）—— 
+   *  后者仍会让 R-05/R-10 降级，故必须照样告警。 */
+  const resourcesEmpty = Object.keys(lintResources).length === 0
+    || !Object.values(lintResources).some((v) => v && Number.isFinite(v.w) && Number.isFinite(v.h));
   /** @type {Object[]} */
   const files = [];
   let entriesApplied = 0;
