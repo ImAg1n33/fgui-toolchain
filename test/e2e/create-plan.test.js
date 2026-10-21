@@ -292,20 +292,21 @@ test('⑤ 未匹配资源进 toImport，且带 reason 与建议尺寸', () => {
   assert.ok(plan.assets.toImport.some((x) => x.layerId === 'L008'));
 });
 
-test('⑥ 图标 bbox 48x48 vs 固有 96x96 → **等比缩放 0.5 并居中**（不放大、不偏移）', () => {
+test('⑥ 图标 bbox 48x48 vs 固有 96x96（宽高比相同）→ 等比缩放 0.5 + 居中，记 decisions 而非 unresolved', () => {
   const f = setup('nostretch');
   assert.equal(runCreatePlan(f).code, 0);
   const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
 
   const icon = plan.nodes.find((n) => n.source.layerId === 'L002');
-  // 等比缩到刚好装下：scale = min(48/96, 48/96, 1) = 0.5 → 48×48，铺满 bbox
   assert.equal(icon.attrs.size, '48,48', '★ 等比缩放 0.5，恰好铺满 bbox（不放大）');
   assert.equal(icon.attrs.xy, '120,200', '★ 居中：size==bbox 时 xy 与 bbox 左上一致（不偏移）');
-  const u = plan.unresolved.find((x) => x.layerId === 'L002');
-  assert.ok(u, '必须记 unresolved');
-  assert.equal(u.reason, 'non-uniform-scale');
-  assert.ok(u.hint.includes('0.5'), `hint 应给出实际 scale，实际：${u.hint}`);
-  assert.ok(u.hint.includes('48,48'), 'hint 应给出最终 size');
+  const d = plan.decisions.find((x) => x.layerId === 'L002');
+  assert.ok(d, '★ 必须记 decisions（可审计）');
+  assert.equal(d.kind, 'proportional-scale');
+  assert.equal(d.scale, 0.5);
+  assert.equal(d.aspectPreserved, true);
+  assert.ok(!plan.unresolved.some((u) => u.layerId === 'L002'),
+    '★ 宽高比相同 = 已自动处理，不进 unresolved（第六轮审查）');
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -331,18 +332,20 @@ test('⑦ 两次运行 create_plan.json / .md md5 一致（B9）', () => {
   assert.ok(!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(md), 'md 不得含时间戳');
 });
 
-test('⑧ create_plan.md 含「待人工确认」清单（toImport / unresolved / deferred / 估计值）', () => {
+test('⑧ create_plan.md 含「已自动处理」与「待人工确认」两节', () => {
   const f = setup('md');
   assert.equal(runCreatePlan(f).code, 0);
   const md = fs.readFileSync(path.join(f.out, 'create_plan.md'), 'utf8');
 
   assert.ok(md.includes('# CREATE 计划'), 'md 有标题');
+  assert.ok(md.includes('## 已自动处理'), '★ 决策单独成节（可审计）');
+  assert.ok(md.includes('等比缩放'), 'decisions 里有等比缩放记录');
   assert.ok(md.includes('## 待人工确认'), '★ 必须有「待人工确认」节');
   assert.ok(md.includes('需要导入素材'), '列出待导入素材');
-  assert.ok(md.includes('non-uniform-scale'), '列出未决项');
   assert.ok(md.includes('列表项建议'), '列出列表建议');
   assert.ok(md.includes('估计值'), '列出估计值');
   assert.ok(md.includes('v1 明确不做'), '明确声明 v1 边界');
+  assert.ok(md.includes('就绪度'), '顶部有就绪度');
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -414,38 +417,143 @@ test('★ readiness②: 有 toImport 但无 unresolved → needs-human；默认 
   assert.equal(strict.code, 4, `★ --strict 非 ready 应退 4，实际 ${strict.code}`);
 });
 
-test('★ readiness③: 有 unresolved → blocked；--strict 退 4', () => {
-  const f = setup('rd-blocked'); // 默认 fixture：图标 48x48 vs 固有 96x96 → non-uniform-scale
+test('★ readiness③: 资源歧义（真 blocked）→ blocked；--strict 退 4', () => {
+  const f = setupClean('rd-blocked');
+  // 加一个图层，其资源名在包里有两个候选（.png/.jpg）→ ambiguous（severity=blocked）
+  const ir = JSON.parse(fs.readFileSync(f.irPath, 'utf8'));
+  ir.layers.unshift({
+    id: 'L007', name: '歧义图', normName: '歧义图', type: 'raster',
+    bbox: { x: 300, y: 400, w: 60, h: 60 }, opacity: 1, visible: true,
+  });
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+  const idx = JSON.parse(fs.readFileSync(f.idxPath, 'utf8'));
+  idx.resources.push(
+    { pkg: 'Mail', pkgId: 'm', type: 'image', id: 'q0amb1', name: '歧义图.png', exported: 'true', width: 60, height: 60 },
+    { pkg: 'Mail', pkgId: 'm', type: 'image', id: 'q0amb2', name: '歧义图.jpg', exported: 'true', width: 60, height: 60 },
+  );
+  fs.writeFileSync(f.idxPath, `${JSON.stringify(idx, null, 2)}\n`, 'utf8');
+
   const r = runCreatePlan(f);
   assert.equal(r.code, 0);
   const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
   assert.equal(plan.readiness.status, 'blocked');
-  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'unresolved'));
+  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'unresolved-blocked'));
+  assert.equal(plan.unresolved.find((u) => u.layerId === 'L007').reason, 'ambiguous-asset');
 
   const strict = runCreatePlan(f, ['--strict']);
   assert.equal(strict.code, 4);
 });
 
-test('★ readiness④: blockers 的 kind/count 与实际计数一致', () => {
+test('★ readiness④: blockers 的 kind/count 与实际计数一致（分 severity）', () => {
   const f = setup('rd-counts');
   assert.equal(runCreatePlan(f).code, 0);
   const plan = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
   const byKind = Object.fromEntries(plan.readiness.blockers.map((b) => [b.kind, b.count]));
 
-  assert.equal(byKind.unresolved, plan.unresolved.length);
+  const blockedUnres = plan.unresolved.filter((u) => u.severity === 'blocked').length;
+  const adjustable = plan.unresolved.filter((u) => u.severity === 'needs-human').length;
+  if (blockedUnres) assert.equal(byKind['unresolved-blocked'], blockedUnres);
+  if (adjustable) assert.equal(byKind['unresolved-adjustable'], adjustable);
   assert.equal(byKind.toImport, plan.assets.toImport.length);
   // deferred 只数「需处理的」：controllers + listItems + 非 advisory 的 relations
   const actionable = plan.deferred.controllers.length
     + plan.deferred.listItems.length
-    + plan.deferred.relations.filter((r) => r.advisory !== true).length;
+    + plan.deferred.relations.filter((r) => !r.advisory).length;
   assert.equal(byKind.deferred, actionable);
   // 通用 Relations 建议必须带 advisory（否则 ready 永远不可能出现）
   assert.ok(plan.deferred.relations.some((r) => r.advisory === true));
+  // 每个 unresolved 条目都必须有 severity（不允许「无档」）
+  assert.ok(plan.unresolved.every((u) => u.severity === 'blocked' || u.severity === 'needs-human'),
+    `每个 unresolved 必须有 severity，实际 ${JSON.stringify(plan.unresolved.map((u) => u.severity))}`);
 
-  // md 顶部要有就绪度一行
   const md = fs.readFileSync(path.join(f.out, 'create_plan.md'), 'utf8');
   assert.ok(/就绪度/.test(md), 'md 顶部应说明就绪度');
-  assert.ok(/blocked/.test(md));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 第六轮审查：画布门禁 / 目标包门禁
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ 门禁1: canvas mismatch → readiness=needs-human + canvas-mismatch + --strict 退 4', () => {
+  const f = setupClean('gate-canvas');
+  const ir = JSON.parse(fs.readFileSync(f.irPath, 'utf8'));
+  ir.source.canvas = { w: 1080, h: 1920 };
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+
+  // 不传 --canvas → 跟随 IR（1080x1920），干净
+  const ok = runCreatePlan(f);
+  assert.equal(ok.code, 0);
+  const p1 = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.equal(p1.readiness.status, 'ready', `实际 ${JSON.stringify(p1.readiness.blockers)}`);
+
+  // 传不一致的 --canvas → needs-human（坐标基准不符，绝不能 ready）
+  const f2 = setupClean('gate-canvas2');
+  const ir2 = JSON.parse(fs.readFileSync(f2.irPath, 'utf8'));
+  ir2.source.canvas = { w: 1080, h: 1920 };
+  fs.writeFileSync(f2.irPath, `${JSON.stringify(ir2, null, 2)}\n`, 'utf8');
+  const bad = runCreatePlan(f2, ['--canvas', '750x1334']);
+  assert.equal(bad.code, 0, '默认仍 0（产物照常落盘）');
+  const p2 = JSON.parse(fs.readFileSync(path.join(f2.out, 'create_plan.json'), 'utf8'));
+  assert.equal(p2.readiness.status, 'needs-human');
+  assert.deepEqual(p2.readiness.blockers, [{ kind: 'canvas-mismatch', count: 1 }]);
+
+  const strict = runCreatePlan(f2, ['--canvas', '750x1334', '--strict']);
+  assert.equal(strict.code, 4, '★ 坐标基准不符时 --strict 必须退 4');
+});
+
+test('★ 门禁2: canvas source=default → needs-human + canvas-default', () => {
+  const f = setupClean('gate-default');
+  const ir = JSON.parse(fs.readFileSync(f.irPath, 'utf8'));
+  delete ir.source.canvas;
+  fs.writeFileSync(f.irPath, `${JSON.stringify(ir, null, 2)}\n`, 'utf8');
+
+  assert.equal(runCreatePlan(f).code, 0);
+  const p = JSON.parse(fs.readFileSync(path.join(f.out, 'create_plan.json'), 'utf8'));
+  assert.equal(p.canvas.source, 'default');
+  assert.equal(p.readiness.status, 'needs-human');
+  assert.deepEqual(p.readiness.blockers, [{ kind: 'canvas-default', count: 1 }]);
+  assert.equal(runCreatePlan(f, ['--strict']).code, 4);
+});
+
+test('★ 门禁3: 目标包（--pkg 不存在 → blocked / 多包未指定 → needs-human / 单包自动选中）', () => {
+  // (a) --pkg 不存在
+  const a = setupClean('gate-pkg-a');
+  const badPkg = runCreatePlan(a, ['--pkg', 'Nope']);
+  assert.equal(badPkg.code, 0);
+  const pa = JSON.parse(fs.readFileSync(path.join(a.out, 'create_plan.json'), 'utf8'));
+  assert.equal(pa.readiness.status, 'blocked');
+  assert.ok(pa.readiness.blockers.some((b) => b.kind === 'pkg-not-found'));
+  assert.equal(runCreatePlan(a, ['--pkg', 'Nope', '--strict']).code, 4);
+
+  // (b) 多包且未指定 --pkg → needs-human + pkg-ambiguous（绝不静默挑第一个）
+  const b = setupClean('gate-pkg-b');
+  const idxB = JSON.parse(fs.readFileSync(b.idxPath, 'utf8'));
+  idxB.project.packages.push({ name: 'Common', id: 'c' });
+  fs.writeFileSync(b.idxPath, `${JSON.stringify(idxB, null, 2)}\n`, 'utf8');
+  assert.equal(runCreatePlan(b).code, 0);
+  const pb = JSON.parse(fs.readFileSync(path.join(b.out, 'create_plan.json'), 'utf8'));
+  assert.equal(pb.readiness.status, 'needs-human');
+  assert.ok(pb.readiness.blockers.some((x) => x.kind === 'pkg-ambiguous'));
+  assert.equal(pb.page.pkg, null, '★ 不猜包 → page.pkg 为 null');
+  assert.ok(pb.warnings.some((w) => w.code === 'PKG_AMBIGUOUS'), '应显式告警');
+
+  // (c) 单包自动选中 → decision 记录
+  const c = setupClean('gate-pkg-c');
+  assert.equal(runCreatePlan(c).code, 0);
+  const pc = JSON.parse(fs.readFileSync(path.join(c.out, 'create_plan.json'), 'utf8'));
+  assert.ok(pc.decisions.some((d) => d.kind === 'pkg-auto-selected' && d.pkg === 'Mail'));
+  assert.equal(pc.page.pkg, 'Mail');
+
+  // (d) 索引里没有任何包 → blocked + no-target-package
+  const d = setupClean('gate-pkg-d');
+  const idxD = JSON.parse(fs.readFileSync(d.idxPath, 'utf8'));
+  idxD.project.packages = [];
+  fs.writeFileSync(d.idxPath, `${JSON.stringify(idxD, null, 2)}\n`, 'utf8');
+  assert.equal(runCreatePlan(d).code, 0);
+  const pd = JSON.parse(fs.readFileSync(path.join(d.out, 'create_plan.json'), 'utf8'));
+  assert.equal(pd.readiness.status, 'blocked');
+  assert.ok(pd.readiness.blockers.some((x) => x.kind === 'no-target-package'));
+  assert.equal(runCreatePlan(d, ['--strict']).code, 4);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -282,9 +282,15 @@ function buildCreatePlan(args = {}) {
 
   const pkgs = (projectIndex.project && Array.isArray(projectIndex.project.packages))
     ? projectIndex.project.packages : [];
-  const pkg = typeof args.pkg === 'string' && args.pkg.trim()
-    ? args.pkg.trim()
-    : (pkgs.length && pkgs[0].name ? String(pkgs[0].name) : null);
+  /** 已自动处理的决策（不是问题）：等比缩放、包自动选中…（第六轮审查要求可审计） */
+  const decisions = [];
+  // ★ 目标包门禁（第六轮审查 P0）：绝不静默挑一个包去匹配资源 ★
+  const pkgGate = resolveTargetPkg({
+    pkgNames: pkgs.filter((p) => p && p.name).map((p) => String(p.name)),
+    requested: args.pkg,
+    decisions,
+  });
+  const pkg = pkgGate.pkg;
 
   const pageName = pickPageName(ir, args.pageName, normOpts);
   const { leaves, groupCount } = collectLeavesBottomToTop(ir.layers);
@@ -368,6 +374,7 @@ function buildCreatePlan(args = {}) {
               unresolved.push({
                 layerId: layer.id,
                 reason: 'scale9grid-values-missing',
+                severity: 'blocked', // 缺切格值 → 无法安全拉伸，必须人工
                 hint: `资源 ${res.name || res.id} 标为 9grid 但无切格数据，已按原尺寸 ${rw}x${rh} 保守处理`,
               });
               sizeW = rw; sizeH = rh;
@@ -395,17 +402,39 @@ function buildCreatePlan(args = {}) {
             sizeH = fh;
             node.attrs.xy = `${fx},${fy}`;
             const scaleText = Number(scale.toFixed(4));
-            node.notes.push(`IR bbox ${layer.bbox.w}x${layer.bbox.h} 与资源固有 ${rw}x${rh} 不一致：`
-              + `按「等比缩放、不放大」缩放 scale=${scaleText} → ${fw}x${fh}，并在 bbox 内居中`);
-            unresolved.push({
+            const fromText = `${rw}x${rh}`;
+            const toText = `${fw}x${fh}`;
+            // ★ 宽高比判定（容差 2%）★（第六轮审查：把「已自动处理」与「真未决」分开）
+            //   相同 → 纯等比缩放，**完全合理**，只记 decisions（不进 unresolved），
+            //          否则任何「1080×1920 底图缩进 750×1334 页面」都会被判 blocked，
+            //          绝大多数真实页面将永远进不了 Executor。
+            //   不同 → 已按「装得下 + 居中」处理，但会留白/裁切，需人工确认 → needs-human。
+            const ra = layer.bbox.w / layer.bbox.h;
+            const rb = rw / rh;
+            const sameAspect = Math.abs(ra - rb) <= 0.02 * Math.max(ra, rb);
+            decisions.push({
               layerId: layer.id,
-              // ⚠ reason 保留 `non-uniform-scale`：这是既有契约名（e2e/下游已按此匹配），
-              //   语义已从「不缩放」升级为「等比缩放 + 居中」，但改名会破坏契约，故只更新 hint。
-              reason: 'non-uniform-scale',
-              hint: `图标/立绘等比缩放 scale=${scaleText}（上限 1，不放大）→ size=${fw},${fh}`
-                + `，居中 xy=${fx},${fy}（原 bbox ${layer.bbox.w}x${layer.bbox.h} @ `
-                + `${layer.bbox.x},${layer.bbox.y}，固有 ${rw}x${rh}）`,
+              kind: 'proportional-scale',
+              scale: scaleText,
+              from: fromText,
+              to: toText,
+              aspectPreserved: sameAspect,
             });
+            if (sameAspect) {
+              node.notes.push(`等比缩放 scale=${scaleText}（宽高比保持）${fromText} → ${toText}，`
+                + '并在 bbox 内居中');
+            } else {
+              node.notes.push(`宽高比不一致：等比缩放 scale=${scaleText} ${fromText} → ${toText}，`
+                + 'bbox 内居中（会留白，需人工确认）');
+              unresolved.push({
+                layerId: layer.id,
+                reason: 'aspect-mismatch-adjusted',
+                severity: 'needs-human',
+                hint: `宽高比不一致（bbox ${layer.bbox.w}x${layer.bbox.h} vs 固有 ${rw}x${rh}）：`
+                  + `已等比缩放 scale=${scaleText} → ${toText}，居中 xy=${fx},${fy}`
+                  + '（会留白/裁切，需人工确认是否接受）',
+              });
+            }
           }
         }
         node.confidence = 1.0;
@@ -415,6 +444,7 @@ function buildCreatePlan(args = {}) {
         unresolved.push({
           layerId: layer.id,
           reason: 'ambiguous-asset',
+          severity: 'blocked', // 资源歧义 → 绑错会是静默坏内容，必须人工
           hint: `归一化后命中多个资源，需人工选定：${hit.candidates.join(', ')}`,
         });
       } else if (hit.status === RESOURCE_MATCH.TYPE_MISMATCH) {
@@ -474,6 +504,14 @@ function buildCreatePlan(args = {}) {
 
   // ---- ⑦ 列表建议：同尺寸 + 同列纵向堆叠（≥2）----
   ensureUniqueNames(nodes); // 先消歧，后续建议/引用都以唯一名为准
+  // 包歧义：资源无法按包匹配 → 必须显式说明，别让人误以为「工程里没有这些图」
+  if (pkgGate.blockers.some((b) => b.kind === 'pkg-ambiguous')) {
+    warnings.push({
+      code: 'PKG_AMBIGUOUS',
+      msg: `索引里有多个包且未指定 --pkg —— 未做资源匹配（全部进 toImport），`
+        + '请用 --pkg <包名> 指定后重跑',
+    });
+  }
   const stacks = detectVerticalStacks(nodes);
   for (const s of stacks) {
     deferred.listItems.push({
@@ -539,6 +577,8 @@ function buildCreatePlan(args = {}) {
     components: [], // v1 不建组件（列表项只在 deferred 给建议）
     assets: { reused, toImport },
     deferred,
+    // ★ 已自动处理的决策（可审计，不是问题）★
+    decisions,
     unresolved,
     warnings,
     summary: {
@@ -549,7 +589,8 @@ function buildCreatePlan(args = {}) {
       unresolved: unresolved.length,
     },
     // ★ 就绪度：把「计划生成成功」与「可以构建」分开（v0.3-C）★
-    readiness: computeReadiness({ unresolved, toImport, deferred }),
+    //   分级：blocked（资源歧义/缺切格/包阻断） / needs-human（画布基准、比例调整、待导入）
+    readiness: computeReadiness({ unresolved, toImport, deferred, canvas, pkgGate }),
   };
 
   return plan;
@@ -643,50 +684,120 @@ function ensureUniqueNames(nodes) {
 /** 资源匹配「就绪度」状态（v0.3-C）。 */
 const READINESS = Object.freeze({
   READY: 'ready',             // 无任何待人工项 → 可交给 Executor
-  NEEDS_HUMAN: 'needs-human', // 有待导入素材或需处理的 deferred → 人先确认
-  BLOCKED: 'blocked',         // 有 unresolved（结构性未决）→ 不能构建
+  NEEDS_HUMAN: 'needs-human', // 有需人工确认的项（含坐标基准不确定）→ 人先确认
+  BLOCKED: 'blocked',         // 有结构性未决项 → 不能构建
 });
 
+/** 判定为 blocked 的 blocker 类别（其余非空类别 → needs-human）。 */
+const BLOCKED_KINDS = Object.freeze(new Set([
+  'no-target-package', 'pkg-not-found', 'unresolved-blocked',
+]));
+
+/** blocker 的稳定输出顺序（确定性，B9）。 */
+const BLOCKER_ORDER = Object.freeze([
+  'no-target-package', 'pkg-not-found', 'pkg-ambiguous',
+  'canvas-mismatch', 'canvas-default',
+  'unresolved-blocked', 'unresolved-adjustable',
+  'toImport', 'deferred',
+]);
+
 /**
- * 计算 readiness（外部审查要求：别让「计划生成了」被当成「可以构建了」）。
+ * 决定目标包（第六轮审查 P0：绝不静默挑一个包）。
  *
- * ★ 为什么必须有它 ★
- *   `ok: true` 只表示**规划文件生成成功**；即使有大量 toImport / unresolved /
- *   deferred，命令照样成功退出。未来的 Executor 若把 ok 当成「整页 UI 可成功生成」，
- *   就会在缺素材/结构未决的页面上强行构建 —— 这是灾难性误判。
+ * | 情况 | 结果 |
+ * |---|---|
+ * | 索引无 packages | pkg=null，blocker `no-target-package`（blocked） |
+ * | 指定 --pkg 但索引里没有 | pkg=指定值，blocker `pkg-not-found`（blocked） |
+ * | 未指定且只有一个包 | 自动采用 + decision `pkg-auto-selected` |
+ * | 未指定且有多个包 | pkg=null，blocker `pkg-ambiguous`（needs-human，不猜） |
  *
- * 判定优先级（lead 定）：unresolved → blocked；否则 toImport 或任何**需处理的**
- * deferred → needs-human；全空 → ready。
+ * @param {Object} a
+ * @param {string[]} a.pkgNames 索引里的包名（已过滤空值）
+ * @param {string|undefined|null} a.requested --pkg
+ * @param {Object[]} a.decisions 收集器
+ * @returns {{pkg:string|null, blockers:{kind:string,count:number}[]}}
+ */
+function resolveTargetPkg(a = {}) {
+  const names = Array.isArray(a.pkgNames) ? a.pkgNames : [];
+  const requested = typeof a.requested === 'string' && a.requested.trim() ? a.requested.trim() : null;
+  if (!names.length) {
+    return { pkg: requested, blockers: [{ kind: 'no-target-package', count: 1 }] };
+  }
+  if (requested) {
+    if (!names.includes(requested)) {
+      return { pkg: requested, blockers: [{ kind: 'pkg-not-found', count: 1 }] };
+    }
+    return { pkg: requested, blockers: [] };
+  }
+  if (names.length === 1) {
+    a.decisions.push({ kind: 'pkg-auto-selected', pkg: names[0] });
+    return { pkg: names[0], blockers: [] };
+  }
+  return { pkg: null, blockers: [{ kind: 'pkg-ambiguous', count: names.length }] };
+}
+
+/**
+ * 计算 readiness（把「计划生成成功」与「可以构建」分开）。
+ *
+ * ★ 分级而非一刀切（第六轮审查）★
+ *   `.add` 原口径「有 unresolved 就 blocked」过粗：把 1080×1920 底图等比缩进
+ *   750×1334 页面这种**完全合理**的处理也判成 blocked，会让绝大多数真实页面
+ *   永远进不了 Executor。故按**严重度**分级：
+ *     · blocked      ← unresolved 里 severity==='blocked'（资源歧义 / 缺切格值）
+ *                      + 包相关阻断（无包 / 指定包不存在）
+ *     · needs-human  ← 画布基准不确定（mismatch / 默认兜底）
+ *                      + severity==='needs-human'（宽高比不一致但已调整）
+ *                      + toImport + 需处理的 deferred + 包歧义
  *
  * ★ 关于 `advisory` ★
- *   `deferred.relations` 里有一条「绝对定位 → 请人工加 Relations」是**对每一页都
- *   成立的通用建议**，不是检测到的问题。若把它也计入 blocker，则任何页面永远不可能
- *   ready（`--strict` 恒为 4，失去意义）。故这类条目带 `advisory: true`，**不计入
- *   blocker**，但仍保留在 plan 与 md 里可见 —— 既不为难 CI，也不隐藏事实。
+ *   「绝对定位 → 请人工加 Relations」对每页都成立，不是检测到的问题；计入会让
+ *   `ready` 永不可达、`--strict` 恒为 4。故带 `advisory: true`，不计入 blocker，
+ *   但仍保留在 plan/md 里可见。
  *
  * @param {Object} a
  * @param {Object[]} [a.unresolved]
  * @param {Object[]} [a.toImport]
  * @param {Object} [a.deferred]
+ * @param {Object} [a.canvas] 含 source/mismatch
+ * @param {Object} [a.pkgGate] resolveTargetPkg 的返回值
  * @returns {{status:string, blockers:{kind:string,count:number}[]}}
  */
 function computeReadiness(a = {}) {
   const unresolved = Array.isArray(a.unresolved) ? a.unresolved : [];
   const toImport = Array.isArray(a.toImport) ? a.toImport : [];
   const d = a.deferred && typeof a.deferred === 'object' ? a.deferred : {};
+  const canvas = a.canvas && typeof a.canvas === 'object' ? a.canvas : {};
+  const pkgGate = a.pkgGate && typeof a.pkgGate === 'object' ? a.pkgGate : { blockers: [] };
   const actionableDeferred = [
     ...(Array.isArray(d.controllers) ? d.controllers : []),
     ...(Array.isArray(d.listItems) ? d.listItems : []),
     ...(Array.isArray(d.relations) ? d.relations : []).filter((r) => !(r && r.advisory === true)),
   ];
 
-  const blockers = [];
-  if (unresolved.length) blockers.push({ kind: 'unresolved', count: unresolved.length });
-  if (toImport.length) blockers.push({ kind: 'toImport', count: toImport.length });
-  if (actionableDeferred.length) blockers.push({ kind: 'deferred', count: actionableDeferred.length });
+  const acc = new Map();
+  const add = (kind, count) => {
+    if (!count) return;
+    acc.set(kind, (acc.get(kind) || 0) + count);
+  };
 
-  const status = unresolved.length
-    ? READINESS.BLOCKED
+  for (const b of (pkgGate.blockers || [])) add(b.kind, b.count || 1);
+  // ★ 坐标基准不确定绝不能叫 ready：Executor 会按 plan 里的坐标原样落盘 ★
+  if (canvas.mismatch === true) add('canvas-mismatch', 1);
+  if (canvas.source === 'default') add('canvas-default', 1);
+
+  const blockedUnres = unresolved.filter((u) => u && u.severity === 'blocked');
+  const adjustableUnres = unresolved.filter((u) => u && u.severity === 'needs-human');
+  add('unresolved-blocked', blockedUnres.length);
+  add('unresolved-adjustable', adjustableUnres.length);
+  add('toImport', toImport.length);
+  add('deferred', actionableDeferred.length);
+
+  const blockers = BLOCKER_ORDER
+    .filter((k) => acc.has(k))
+    .map((k) => ({ kind: k, count: acc.get(k) }));
+
+  const hasBlocked = blockers.some((b) => BLOCKED_KINDS.has(b.kind));
+  const status = hasBlocked ? READINESS.BLOCKED
     : (blockers.length ? READINESS.NEEDS_HUMAN : READINESS.READY);
   return { status, blockers };
 }
@@ -695,8 +806,10 @@ module.exports = {
   buildCreatePlan,
   parseCanvas,
   resolveCanvas,
+  resolveTargetPkg,
   computeReadiness,
   READINESS,
+  BLOCKED_KINDS,
   sanitizeName,
   sanitizeComponentName,
   pickPageName,

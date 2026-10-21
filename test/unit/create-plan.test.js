@@ -16,7 +16,7 @@ const assert = require('node:assert/strict');
 
 const {
   buildCreatePlan, parseCanvas, sanitizeName, pickPageName,
-  coversCanvas, detectBackgroundLayerId, collectLeavesBottomToTop,
+  coversCanvas, detectBackgroundLayerId, collectLeavesBottomToTop, resolveTargetPkg,
   detectVerticalStacks, detectOverlapping, computeReadiness, DEFAULT_CANVAS,
 } = require('../../src/create/plan-builder');
 const { renderPlanMarkdown } = require('../../src/create/plan-markdown');
@@ -232,9 +232,9 @@ test('★ 未匹配资源 → toImport（带建议文件名与尺寸，绝不静
   assert.ok(node.notes.some((x) => x.includes('toImport')), '节点也要说明');
 });
 
-test('★ 图标等比缩放+居中: bbox 48x48 vs 固有 96x96 → size 48,48（scale 0.5）且居中', () => {
-  // team-lead 实跑数据：bbox 48×48 @ (340,700)、资源固有 96×96。
-  // 期望：等比缩到刚好装下（0.5）→ 48×48；并在 bbox 内居中（宽高都等于 bbox，故 xy 不变）。
+test('★ 等比缩放（宽高比相同）: bbox 48x48 / 固有 96x96 → size 48,48 + 记 decisions、**不进 unresolved**', () => {
+  // team-lead 实跑数据：bbox 48×48 @ (340,700)、资源固有 96×96（宽高比同为 1:1）。
+  // 第六轮审查：纯等比缩放是**已自动处理**，不该判 blocked。
   const idx = indexFixture();
   idx.resources.push({
     pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic2', name: '小图标.png',
@@ -246,16 +246,17 @@ test('★ 图标等比缩放+居中: bbox 48x48 vs 固有 96x96 → size 48,48�
   const n = plan.nodes.find((x) => x.source.layerId === 'L020');
   assert.equal(n.attrs.size, '48,48', '★ 等比缩放 0.5 → 恰好铺满 bbox');
   assert.equal(n.attrs.xy, '340,700', '★ 居中后 xy 与 bbox 左上角一致（size == bbox）');
-  const u = plan.unresolved.find((x) => x.layerId === 'L020');
-  assert.ok(u && u.reason === 'non-uniform-scale');
-  assert.ok(u.hint.includes('0.5'), `hint 应给出实际 scale，实际：${u.hint}`);
-  assert.ok(u.hint.includes('48,48'), 'hint 应给出最终 size');
-  assert.ok(u.hint.includes('340,700'), 'hint 应给出最终 xy');
+  const d = plan.decisions.find((x) => x.layerId === 'L020');
+  assert.ok(d, '必须有 decision 记录（可审计）');
+  assert.equal(d.kind, 'proportional-scale');
+  assert.equal(d.scale, 0.5);
+  assert.equal(d.from, '96x96');
+  assert.equal(d.to, '48x48');
+  assert.equal(d.aspectPreserved, true);
+  assert.ok(!plan.unresolved.some((x) => x.layerId === 'L020'), '★ 宽高比相同 → 不进 unresolved');
 });
 
-test('★ 图标等比缩放: bbox 200x200 vs 固有 96x96 → scale 被 1 截断（不放大）+ 居中', () => {
-  // 期望：scale = min(200/96, 200/96, 1) = 1 → size 96×96；
-  //       xy = bbox.x + (200-96)/2 = 340+52 = 392；y 同理 700+52 = 752。
+test('★ 等比缩放（scale 截断为 1）: bbox 200x200 / 固有 96x96 → size 96,96 + 居中，仍不进 unresolved', () => {
   const idx = indexFixture();
   idx.resources.push({
     pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic3', name: '大框小图.png',
@@ -267,11 +268,12 @@ test('★ 图标等比缩放: bbox 200x200 vs 固有 96x96 → scale 被 1 截�
   const n = plan.nodes.find((x) => x.source.layerId === 'L021');
   assert.equal(n.attrs.size, '96,96', '★ scale 上限 1：绝不放大');
   assert.equal(n.attrs.xy, '392,752', '★ 在 bbox 内居中');
-  const u = plan.unresolved.find((x) => x.layerId === 'L021');
-  assert.ok(u.hint.includes('scale=1'), `hint 应说明 scale 被截断为 1，实际：${u.hint}`);
+  const d = plan.decisions.find((x) => x.layerId === 'L021');
+  assert.ok(d && d.scale === 1, 'decision 应记录 scale=1（截断）');
+  assert.ok(!plan.unresolved.some((x) => x.layerId === 'L021'), '宽高比相同 → 不进 unresolved');
 });
 
-test('图标: 宽高比不同（bbox 120x48 vs 固有 96x96）→ 等比缩到装得下（0.5）并居中', () => {
+test('★ 宽高比不同: bbox 120x48 / 固有 96x96 → decisions + unresolved(aspect-mismatch-adjusted, needs-human)', () => {
   const idx = indexFixture();
   idx.resources.push({
     pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic4', name: '异形.png',
@@ -281,9 +283,15 @@ test('图标: 宽高比不同（bbox 120x48 vs 固有 96x96）→ 等比缩到�
   ir.layers.splice(1, 0, layer('L022', '异形', 'raster', { x: 100, y: 800, w: 120, h: 48 }));
   const plan = build({ ir, projectIndex: idx });
   const n = plan.nodes.find((x) => x.source.layerId === 'L022');
-  // scale = min(120/96=1.25, 48/96=0.5, 1) = 0.5 → 48x48；x 居中 = 100+(120-48)/2 = 136；y = 800+0 = 800
+  // scale = min(120/96=1.25, 48/96=0.5, 1) = 0.5 → 48x48；x 居中 = 100+(120-48)/2 = 136
   assert.equal(n.attrs.size, '48,48');
   assert.equal(n.attrs.xy, '136,800');
+  const d = plan.decisions.find((x) => x.layerId === 'L022');
+  assert.ok(d && d.aspectPreserved === false, 'decision 要标明宽高比未保持');
+  const u = plan.unresolved.find((x) => x.layerId === 'L022');
+  assert.ok(u, '宽高比不同 → 仍需人工确认');
+  assert.equal(u.reason, 'aspect-mismatch-adjusted');
+  assert.equal(u.severity, 'needs-human', '★ 不再是 blocked');
 });
 
 test('九宫格: 摆放 > 固有 且资源具备 9grid → 建议 scale9grid（无切格值不猜）', () => {
@@ -421,27 +429,115 @@ test('★ readiness: 有需处理的 deferred → needs-human（advisory 之外�
   assert.deepEqual(r.blockers, [{ kind: 'deferred', count: 2 }], '控制器 1 + 非 advisory 关系 1');
 });
 
-test('★ readiness: 有 unresolved → **blocked**（优先级最高），blockers 列出全部非空类别', () => {
+test('★ readiness: severity=blocked 的 unresolved → blocked；blockers 按 kind 分档', () => {
   const r = computeReadiness({
-    unresolved: [{ layerId: 'L2', reason: 'non-uniform-scale' }],
+    unresolved: [
+      { layerId: 'L2', reason: 'ambiguous-asset', severity: 'blocked' },
+      { layerId: 'L9', reason: 'aspect-mismatch-adjusted', severity: 'needs-human' },
+    ],
     toImport: [{ layerId: 'L4' }],
     deferred: { controllers: [], relations: [{ advisory: true }], listItems: [{ suggestion: 'Comp/AItem' }] },
   });
   assert.equal(r.status, 'blocked');
   assert.deepEqual(r.blockers, [
-    { kind: 'unresolved', count: 1 },
+    { kind: 'unresolved-blocked', count: 1 },
+    { kind: 'unresolved-adjustable', count: 1 },
     { kind: 'toImport', count: 1 },
     { kind: 'deferred', count: 1 },
   ]);
 });
 
-test('readiness 已写入 create_plan；且与 toImport/unresolved 计数一致', () => {
+test('★ readiness: 只有 severity=needs-human 的 unresolved → needs-human（不再一刀切 blocked）', () => {
+  const r = computeReadiness({
+    unresolved: [{ layerId: 'L9', reason: 'aspect-mismatch-adjusted', severity: 'needs-human' }],
+    toImport: [],
+    deferred: { controllers: [], relations: [{ advisory: true }], listItems: [] },
+  });
+  assert.equal(r.status, 'needs-human');
+  assert.deepEqual(r.blockers, [{ kind: 'unresolved-adjustable', count: 1 }]);
+});
+
+// —— 画布门禁（第六轮审查任务 1）——
+
+test('★ readiness: canvas.mismatch → needs-human + canvas-mismatch（坐标基准不符绝不 ready）', () => {
+  const r = computeReadiness({
+    unresolved: [], toImport: [], deferred: {},
+    canvas: { w: 750, h: 1334, source: 'cli', mismatch: true, irCanvas: { w: 1080, h: 1920 } },
+  });
+  assert.equal(r.status, 'needs-human');
+  assert.deepEqual(r.blockers, [{ kind: 'canvas-mismatch', count: 1 }]);
+});
+
+test('★ readiness: canvas.source="default" → needs-human + canvas-default', () => {
+  const r = computeReadiness({
+    unresolved: [], toImport: [], deferred: {},
+    canvas: { w: 750, h: 1334, source: 'default' },
+  });
+  assert.equal(r.status, 'needs-human');
+  assert.deepEqual(r.blockers, [{ kind: 'canvas-default', count: 1 }]);
+});
+
+test('readiness: canvas.source="ir" / "cli" 且无 mismatch → 干净（不加 blocker）', () => {
+  for (const canvas of [{ w: 750, h: 1334, source: 'ir' }, { w: 750, h: 1334, source: 'cli' }]) {
+    const r = computeReadiness({ unresolved: [], toImport: [], deferred: {}, canvas });
+    assert.equal(r.status, 'ready', JSON.stringify(canvas));
+    assert.deepEqual(r.blockers, []);
+  }
+});
+
+// —— 目标包门禁（第六轮审查任务 3）——
+
+test('★ resolveTargetPkg: 无包 / 指定不存在 / 多包未指定 / 单包自动选中', () => {
+  // 索引里没有包 → blocked
+  const none = { decisions: [] };
+  const r1 = resolveTargetPkg({ pkgNames: [], requested: undefined, decisions: none.decisions });
+  assert.equal(r1.pkg, null);
+  assert.deepEqual(r1.blockers, [{ kind: 'no-target-package', count: 1 }]);
+
+  // 指定 --pkg 但不存在 → blocked
+  const r2 = resolveTargetPkg({ pkgNames: ['A', 'B'], requested: 'Nope', decisions: [] });
+  assert.equal(r2.pkg, 'Nope');
+  assert.deepEqual(r2.blockers, [{ kind: 'pkg-not-found', count: 1 }]);
+
+  // 未指定 + 多包 → needs-human（不猜）
+  const r3 = resolveTargetPkg({ pkgNames: ['A', 'B'], requested: undefined, decisions: [] });
+  assert.equal(r3.pkg, null, '★ 多包时绝不静默挑第一个');
+  assert.deepEqual(r3.blockers, [{ kind: 'pkg-ambiguous', count: 2 }]);
+
+  // 未指定 + 单包 → 自动采用 + decision
+  const d4 = [];
+  const r4 = resolveTargetPkg({ pkgNames: ['Only'], requested: undefined, decisions: d4 });
+  assert.equal(r4.pkg, 'Only');
+  assert.deepEqual(r4.blockers, []);
+  assert.deepEqual(d4, [{ kind: 'pkg-auto-selected', pkg: 'Only' }]);
+
+  // 指定且存在 → 直接用，无 blocker
+  const r5 = resolveTargetPkg({ pkgNames: ['A', 'B'], requested: 'B', decisions: [] });
+  assert.equal(r5.pkg, 'B');
+  assert.deepEqual(r5.blockers, []);
+});
+
+test('★ readiness: 包门禁的三档（无包/不存在 → blocked；多包 → needs-human）', () => {
+  const base = { unresolved: [], toImport: [], deferred: {}, canvas: { source: 'ir', w: 1, h: 1 } };
+  assert.equal(computeReadiness({ ...base, pkgGate: { blockers: [{ kind: 'no-target-package', count: 1 }] } }).status,
+    'blocked');
+  assert.equal(computeReadiness({ ...base, pkgGate: { blockers: [{ kind: 'pkg-not-found', count: 1 }] } }).status,
+    'blocked');
+  assert.equal(computeReadiness({ ...base, pkgGate: { blockers: [{ kind: 'pkg-ambiguous', count: 3 }] } }).status,
+    'needs-human');
+});
+
+test('readiness 已写入 create_plan；默认 fixture 的图标是「等比缩放」→ 不进 unresolved', () => {
   const plan = build();
   assert.ok(plan.readiness, '必须有 readiness');
-  assert.equal(plan.readiness.status, 'blocked', '本 fixture 有图标 non-uniform-scale');
-  assert.ok(plan.readiness.blockers.some((b) => b.kind === 'unresolved'));
+  // 默认 fixture：图标 48×48 vs 固有 96×96（同为 1:1）→ 已自动处理
+  assert.ok(plan.decisions.some((d) => d.kind === 'proportional-scale' && d.layerId === 'L002'));
+  assert.ok(!plan.unresolved.some((u) => u.layerId === 'L002'), '等比缩放不再算未决');
+  // 仍有 toImport（未登记图/行图/背景）+ listItems → needs-human
+  assert.equal(plan.readiness.status, 'needs-human');
   assert.ok(plan.readiness.blockers.some((b) => b.kind === 'toImport'));
   assert.ok(plan.readiness.blockers.some((b) => b.kind === 'deferred'));
+  assert.ok(!plan.readiness.blockers.some((b) => b.kind === 'unresolved-blocked'));
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -465,7 +561,8 @@ test('外壳: version/mode/canvas/page/nodes/components/assets/deferred/unresolv
   // 无资源的图层全部进 toImport：未匹配图 / 行1 / 行2 / 行3 / 背景 = 5
   // （背景没有登记资源时也必须进待导入 —— 不静默丢）
   assert.equal(plan.summary.toImport, 5);
-  assert.equal(plan.summary.unresolved, 1, '图标 non-uniform-scale');
+  assert.equal(plan.summary.unresolved, 0, '图标的纯等比缩放属「已自动处理」，不进 unresolved');
+  assert.ok(plan.decisions.some((d) => d.kind === 'proportional-scale'), '但必须留在 decisions 里可审计');
   assert.equal(
     plan.summary.deferred,
     plan.deferred.controllers.length + plan.deferred.relations.length + plan.deferred.listItems.length,
@@ -502,11 +599,12 @@ test('★ 确定性（B9）: 同一输入两次 build → JSON 逐字节一致',
   assert.equal(renderPlanMarkdown(build()), renderPlanMarkdown(build()));
 });
 
-test('md: 含「待人工确认」清单（toImport/unresolved/deferred/估计值）', () => {
+test('md: 含「已自动处理」与「待人工确认」两节（决策/问题分栏）', () => {
   const md = renderPlanMarkdown(build());
   assert.ok(md.includes('待人工确认'), '★ 必须有该节');
+  assert.ok(md.includes('好') || md.includes('## 已自动处理'), '★ 决策要单独成节（可审计）');
+  assert.ok(md.includes('等比缩放'), 'decisions 里要有等比缩放记录');
   assert.ok(md.includes('需要导入素材'));
-  assert.ok(md.includes('non-uniform-scale'));
   assert.ok(md.includes('列表项建议'));
   assert.ok(md.includes('估计值'));
   assert.ok(!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(md), 'md 不得含时间戳（B9）');

@@ -57,6 +57,24 @@ function renderPlanMarkdown(plan) {
   }
   push('');
 
+  // ---- 已自动处理（可审计，不是问题）----
+  const decisions = Array.isArray(p.decisions) ? p.decisions : [];
+  if (decisions.length) {
+    push('## 已自动处理');
+    push('');
+    for (const d of decisions) {
+      if (d.kind === 'proportional-scale') {
+        push(`- 图层 \`${d.layerId}\`：等比缩放 scale=${d.scale}（${d.from} → ${d.to}）`
+          + `${d.aspectPreserved ? '' : '，**宽高比不一致，已居中并留白**'}`);
+      } else if (d.kind === 'pkg-auto-selected') {
+        push(`- 目标包：未指定 \`--pkg\`，索引里只有一个包 \`${d.pkg}\`，已自动采用`);
+      } else {
+        push(`- ${d.kind}：${JSON.stringify(d)}`);
+      }
+    }
+    push('');
+  }
+
   // ---- 待人工确认（测试 ⑧ 要求本节存在）----
   push('## 待人工确认');
   push('');
