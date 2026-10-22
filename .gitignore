@@ -52,6 +52,8 @@ docs/*
 # 桥接层命令词表是**技术契约**（由公开上游 Bridge 源码派生，不含公司素材/内部信息），
 # 且 src/create/exec-plan.js 的 BRIDGE_COMMANDS 直接以它为据 —— 必须入库，否则读者无法核对我们"没有编造命令名"。
 !docs/BRIDGE-COMMANDS.md
+# 真实 Bridge 传输契约（HTTP 方法/端口/请求体/响应结构，均带源码行号）——同属技术契约，入库。
+!docs/BRIDGE-TRANSPORT.md
 
 # ---- M1 合成 FGUI 工程：由 make-fgui-project.js 重建（确定性），不入库 ----
 test/fixtures/fgui-project/
