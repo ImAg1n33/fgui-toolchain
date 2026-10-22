@@ -12,14 +12,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { scanSourceTree, scanContent, formatReport, assertNoNetwork } = require('../../src/core/net-guard');
+const {
+  scanSourceTree, scanContent, formatReport, assertNoNetwork, REVIEWED_EXCEPTIONS,
+} = require('../../src/core/net-guard');
 
 const SRC = path.resolve(__dirname, '../../src');
 
 test('K1 禁网: src/ 中零网络 API 引用', () => {
   // ★ 只对 error 级断言零命中。warn 级是「需人工看一眼」的分级告警
   //   （如动态 require、未审查的外部依赖），不是违规 —— 见 BUG#4 修复说明。
-  const hits = scanSourceTree(SRC).filter((h) => h.severity !== 'warn');
+  //   reviewed 级是 create/bridge-http.js 的**已登记豁免**（loopback Bridge
+  //   客户端，理由见 net-guard.js 的 REVIEWED_EXCEPTIONS 与本文件末尾的钉死测试）。
+  const hits = scanSourceTree(SRC).filter((h) => h.severity === 'error');
   assert.equal(hits.length, 0,
     `src/ 中发现网络 API 引用（PRD K1 禁网红线）：\n${formatReport(hits)}`);
 });
@@ -189,9 +193,84 @@ test('★ ALLOWED_BUILTINS 不再是死代码（未审查的外部模块会报 w
 test('★ src/ 扫描：0 error 级命中', () => {
   const path = require('path');
   const hits = scanSourceTree(path.resolve(__dirname, '../../src'));
-  const errors = hits.filter((h) => h.severity !== 'warn');
+  const errors = hits.filter((h) => h.severity === 'error');
   assert.equal(errors.length, 0,
     `src/ 出现网络 API：\n${formatReport(errors)}`);
+});
+
+// ======================================================================
+// ★ 唯一豁免的钉死测试（bridge HTTP 传输层引入后新增）
+//
+// create/bridge-http.js 是 src/ 里**唯一**需要网络能力的文件：它只 POST
+// 本机 FairyGUI 编辑器 Bridge（loopback，契约见 docs/BRIDGE-TRANSPORT.md）。
+// 豁免必须满足全部四条，缺一条即红：
+//   ① 例外表只有一个条目，且就是 create/bridge-http.js；
+//   ② 该文件被降级的命中**恰好**是 require('http') / require('https') 两个；
+//   ③ 豁免不会放大：同一路径下出现 fetch 等其它网络能力仍是 error；
+//   ④ 豁免是「降级」而非「消失」—— reviewed 命中必须仍带豁免理由。
+// ======================================================================
+
+test('★ 豁免①: REVIEWED_EXCEPTIONS 只有一个条目（create/bridge-http.js）', () => {
+  assert.deepEqual(Object.keys(REVIEWED_EXCEPTIONS), ['create/bridge-http.js'],
+    '★ 例外表不许悄悄变长 —— 每一条都是 PRD K1 的让步，必须单独评审');
+  const reason = REVIEWED_EXCEPTIONS['create/bridge-http.js'];
+  assert.ok(/loopback|127\.0\.0\.1/.test(reason), '豁免理由必须写明 loopback 边界');
+  assert.ok(/不含任何素材/.test(reason), '豁免理由必须声明请求体不含素材数据');
+});
+
+test('★ 豁免②: 被降级的命中恰好是 http/https 两个模块引入', () => {
+  const hits = scanSourceTree(SRC).filter((h) => h.severity === 'reviewed');
+  assert.equal(hits.length, 2,
+    `★ 降级命中必须恰好 2 条（http + https），实得：\n${formatReport(hits)}`);
+  assert.deepEqual(hits.map((h) => h.label).sort(),
+    ["require('http')", "require('https')"].sort());
+  for (const h of hits) {
+    assert.equal(h.file, 'create/bridge-http.js');
+    assert.equal(h.kind, 'require');
+    assert.equal(typeof h.exception, 'string');
+    assert.ok(h.exception.length > 10, 'reviewed 命中必须携带豁免理由（不静默）');
+  }
+  // 降级不等于消失：assertNoNetwork 仍能看见它们（打印但不阻断）
+  assert.equal(assertNoNetwork(SRC, { quiet: true }), true);
+});
+
+test('★ 豁免③: 豁免不会放大 —— 同路径出现 fetch 仍是 error 级', () => {
+  const os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-guard-exempt-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'create'));
+    fs.writeFileSync(path.join(dir, 'create/bridge-http.js'),
+      "require('http');\nrequire('https');\nconst r = await fetch(url);\n", 'utf8');
+    const hits = scanSourceTree(dir, { excludeSelf: false });
+    const errors = hits.filter((h) => h.severity === 'error');
+    const reviewed = hits.filter((h) => h.severity === 'reviewed');
+    assert.equal(reviewed.length, 2, '两个 require 仍被豁免');
+    assert.equal(errors.length, 1, '★ fetch 不在豁免清单内，必须保持 error');
+    assert.equal(errors[0].file, 'create/bridge-http.js');
+    assert.throws(() => assertNoNetwork(dir, { excludeSelf: false, quiet: true }),
+      (err) => {
+        assert.match(err.message, /fetch/);
+        return true;
+      });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★ 豁免④: 其它文件的 http require 一律不豁免（回归）', () => {
+  const os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fgui-guard-noexempt-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'create'));
+    // 同名不同路径（不在例外表里）→ 必须 error
+    fs.writeFileSync(path.join(dir, 'other.js'), "require('http');\n", 'utf8');
+    const hits = scanSourceTree(dir, { excludeSelf: false });
+    assert.equal(hits.filter((h) => h.severity === 'error').length, 1,
+      '★ 不在 REVIEWED_EXCEPTIONS 里的文件，require(http) 必须 error');
+    assert.equal(hits.filter((h) => h.severity === 'reviewed').length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('★ src/ 扫描：无未审查的外部模块（依赖白名单是完整的）', () => {

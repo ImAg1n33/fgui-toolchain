@@ -196,6 +196,43 @@ const FORBIDDEN_PATTERNS = Object.freeze([
 ]);
 
 /**
+ * 已审查的 loopback 例外表（**src/ 里唯一的网络能力**，PRD K1 的唯一豁免）。
+ *
+ * ★ 为什么需要这张表 ★
+ *   `create-run` 必须与本机 FairyGUI 编辑器里的 agent-bridge 插件通信
+ *   （HTTP loopback，默认 127.0.0.1:7531 —— 见 `docs/BRIDGE-TRANSPORT.md`），
+ *   没有 HTTP 客户端就完不成这件事。而**静态守卫分不清**「连本机编辑器」
+ *   与「把公司素材发到外网」。与其逼着后人把模块名拆串拼接绕过守卫
+ *   （那才是真的失守），不如把唯一例外**显式登记、逐条限定、被测试钉住**：
+ *     · 只豁免 `require('http')` / `require('https')` 两个模块引入字面量；
+ *     · 命中降级为 `reviewed`（仍进报告、仍打印，**不静默**）；
+ *     · 例外表由 `test/unit/net-guard.test.js` 钉死 —— 想悄悄加条目/加能力会红。
+ *
+ * 安全边界（为什么这不算违反 K1）：
+ *   · 目标 URL 只能来自显式 `--bridge-url` / env `FGUI_BRIDGE_URL`，默认 127.0.0.1；
+ *   · 请求体只有 Bridge 命令与参数，**不含任何素材内容**（素材从不出本机）；
+ *   · 本表之外，src/ 任何网络 API 仍是 error 级、照样让测试红。
+ *
+ * @type {Object<string,string>} 相对 src/ 的路径 -> 豁免理由（必须写清为什么安全）
+ */
+const REVIEWED_EXCEPTIONS = Object.freeze({
+  'create/bridge-http.js':
+    '唯一允许的网络能力：POST 本机 FairyGUI 编辑器 Bridge（loopback 127.0.0.1:7531，'
+    + '契约见 docs/BRIDGE-TRANSPORT.md）。URL 只来自显式 --bridge-url / env FGUI_BRIDGE_URL，'
+    + '请求体仅含 Bridge 命令与参数，不含任何素材数据。',
+});
+
+/**
+ * 例外只豁免这两个**模块引入字面量**。豁免文件里出现任何其它网络能力
+ * （fetch / WebSocket / net.connect / 动态拼接 require …）仍是 error 级。
+ * @type {Set<string>}
+ */
+const EXEMPTED_LABELS = Object.freeze(new Set([
+  `require('${F.protoHttp}')`,
+  `require('${F.protoHttps}')`,
+]));
+
+/**
  * 允许的 Node 内置模块白名单（纯本地能力，不产生网络出站）。
  *
  * ★ QA BUG #4：这一段以前是「导出了但从不被引用」的死代码 ★
@@ -375,7 +412,19 @@ function scanSourceTree(rootDir, opts = {}) {
     } catch {
       continue; // 读不到的文件不是网络违规，跳过
     }
-    hits.push(...scanContent(rel, content));
+    const fileHits = scanContent(rel, content);
+    // 已登记例外：只把「豁免清单内的模块引入」降级为 reviewed（仍可见、不阻断），
+    // 其余命中（哪怕是同一个文件里的 fetch）保持 error 级不动。
+    const exception = REVIEWED_EXCEPTIONS[rel.replace(/\\/g, '/')];
+    if (exception) {
+      for (const h of fileHits) {
+        if (h.severity === 'error' && EXEMPTED_LABELS.has(h.label)) {
+          h.severity = 'reviewed';
+          h.exception = exception;
+        }
+      }
+    }
+    hits.push(...fileHits);
   }
   return hits;
 }
@@ -389,7 +438,12 @@ function formatReport(hits) {
   if (!hits.length) return 'net-guard: src/ 未发现任何网络 API 引用 ✅';
   const lines = ['net-guard 发现违规（PRD K1 禁网红线）：'];
   for (const h of hits) {
-    lines.push(`  - ${h.file}:${h.line}  ${h.label}  // ${h.why}`);
+    if (h.severity === 'reviewed') {
+      // 已登记豁免：明说「这是什么、为什么被放过」，绝不静默
+      lines.push(`  - ${h.file}:${h.line}  ${h.label}  // [已登记豁免] ${h.exception}`);
+    } else {
+      lines.push(`  - ${h.file}:${h.line}  ${h.label}  // ${h.why}`);
+    }
     lines.push(`      ${h.text}`);
   }
   lines.push('修复：移除该引用。P0 全链路不需要任何网络能力。');
@@ -404,12 +458,12 @@ function formatReport(hits) {
  */
 function assertNoNetwork(rootDir, opts) {
   const hits = scanSourceTree(rootDir, opts);
-  // error 级阻断；warn 级不阻断但必须被人看见（打印出来，不静默吞）
-  const errors = hits.filter((h) => h.severity !== 'warn');
-  const warns = hits.filter((h) => h.severity === 'warn');
+  // error 级阻断；warn / reviewed 级不阻断但必须被人看见（打印出来，不静默吞）
+  const errors = hits.filter((h) => h.severity === 'error');
+  const visible = hits.filter((h) => h.severity !== 'error');
   if (errors.length) throw new Error(formatReport(errors));
-  if (warns.length && !(opts && opts.quiet)) {
-    process.stderr.write(formatReport(warns) + '\n');
+  if (visible.length && !(opts && opts.quiet)) {
+    process.stderr.write(formatReport(visible) + '\n');
   }
   return true;
 }
@@ -418,6 +472,7 @@ module.exports = {
   FORBIDDEN_PATTERNS,
   ALLOWED_BUILTINS,
   REQUIRE_LITERAL_RE,
+  REVIEWED_EXCEPTIONS,
   scanSourceTree,
   scanContent,
   formatReport,
