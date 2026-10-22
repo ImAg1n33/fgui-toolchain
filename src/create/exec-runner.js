@@ -24,9 +24,34 @@ const path = require('path');
 
 const { writeJson } = require('../core/fs-json');
 const { parseXmlDocument } = require('../fgui/xml-parse');
+const { parseUiRef } = require('../fgui/resource-resolver');
+const { BRIDGE_COMMANDS, validateStepArgs } = require('./exec-plan');
 
 /** 产物版本。 */
 const REPORT_VERSION = '0.1';
+
+/**
+ * ★ CREATE 允许执行的命令白名单（比"词表内有"更严）★
+ *
+ * 为什么不是"在 BRIDGE_COMMANDS 词表内就放行"：
+ *   `exec_plan` 是 JSON —— 可以被人改，也可能来自不可信来源；而 Bridge **具备修改/删除
+ *   资源的能力**（`delete_item` / `remove_object` / `publish` / `screenshot` …）。
+ *   CREATE 的目标是"建一个页面"，它**不需要**任何删除/发布/写磁盘副作用命令。
+ *   故在词表之外再加一层**能力最小集**：默认只放行建页面所需的命令 + 回读命令。
+ */
+const CREATE_ALLOWED_OPS = Object.freeze([
+  'create_component', // 建页面/组件容器
+  'insert_object', // 插库内已有资源（图片/已有组件）
+  'insert_text', // 插文本
+  'insert_list', // 插列表
+  'insert_loader', // 插装载器
+  'set_image_scale9', // 库内图片标九宫格（跨包底框需要）
+  'save_all', // 落盘
+  // 回读（不写盘）：验证"做对了"而不是"命令 ok"
+  'read_component',
+  'list_children',
+  'list_items',
+]);
 
 /**
  * 从 `read_component` 返回的组件 XML 里取 displayList 的**直接子节点**（按文档顺序）。
@@ -52,6 +77,32 @@ function childrenFromComponentXml(xml) {
     }
   }
   return out;
+}
+
+/**
+ * 把一个"资源引用值"归一化成 `(pkgId, itemId)` —— 用现成的 `parseUiRef`，**不自写解析**。
+ *
+ * ★ 为什么必须归一化（P0-A）★
+ *   真实 FairyGUI 6.1.4 工程里：**同包**引用写**短资源 ID**（`src="q0bg"`），
+ *   跨包写 `ui://<pkgId><itemId>`（拼接）或 `ui://<pkgId>/<itemId>`（斜杠）——
+ *   **三种写法指的是同一个资源**。若拿原始字符串直接比，同包短 ID 会被判成"不同资源"，
+ *   于是"页面其实建对了"却被报成 `verify-failed`，直接毁掉回读验证的信用。
+ *
+ * @param {*} value 引用值（可能是 `ui://…`，也可能是短 ID）
+ * @param {string|null} [fallbackPkgId] 当 value 是**短 ID** 时，它属于哪个包（取期望侧的包 id）
+ * @returns {{pkgId:string|null, itemId:string}|null} 无法归一化 → null（调用方须按"不一致"处理）
+ */
+function normalizeRef(value, fallbackPkgId) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  if (!v) return null;
+  if (/^ui:\/\//i.test(v)) {
+    const p = parseUiRef(v);
+    return p ? { pkgId: p.pkgId, itemId: p.itemId } : null;
+  }
+  if (v.includes('://')) return null; // 别的协议（http:// 等）不是 FGUI 资源引用
+  // 短资源 ID：本身不含包信息 → 视为"目标包"（fallbackPkgId）内的资源
+  return { pkgId: fallbackPkgId || null, itemId: v };
 }
 
 /**
@@ -95,9 +146,18 @@ function compareVerify(v, res) {
         diffs.push(diff(where, 'child', '存在', '缺失'));
         continue;
       }
-      // ★ 图片比 url（对应 XML 的 src/url），文本等比 name —— 与 exec-plan 的约定一致 ★
-      if (e.url !== undefined && e.url !== null && a.src !== e.url) {
-        diffs.push(diff(where, 'url', e.url, a.src));
+      // ★ 图片比"归一化后的引用"（对应 XML 的 src/url），文本等比 name —— 与 exec-plan 约定一致 ★
+      if (e.url !== undefined && e.url !== null) {
+        const want = normalizeRef(e.url, null);
+        // 回读侧的短 ID 视为「期望侧那个包」内的资源
+        const got = normalizeRef(a.src, want ? want.pkgId : null);
+        if (!want || !got) {
+          diffs.push(diff(where, 'url', e.url, a.src));
+          diffs.push(diff(where, 'url.normalize', '可解析的引用', !want ? `期望值无法归一化` : `实际值无法归一化：${String(a.src)}`));
+        } else if (want.itemId !== got.itemId
+          || (want.pkgId && got.pkgId && want.pkgId !== got.pkgId)) {
+          diffs.push(diff(where, 'url', `${want.pkgId || '(短ID)'}/${want.itemId}`, `${got.pkgId || '(短ID)'}/${got.itemId}`));
+        }
       }
       if (e.name !== undefined && e.name !== null && a.name !== e.name) {
         diffs.push(diff(where, 'name', e.name, a.name));
@@ -184,13 +244,66 @@ async function runExecPlan(execPlan, transport, opts = {}) {
     report.reason = `${invalidCount} 个步骤参数不合规，拒绝执行`;
     return { report };
   }
+
+  // ── ①b 最终门禁：不信任"调用方传进来的自述"，Runner 自己再过一道 ──
+  //   exec_plan 是 JSON：可以被人工改，也可能来自不可信来源；
+  //   而 Bridge 具备修改/删除资源的能力 —— 故在调 transport 前必须复核四件事。
+  const steps = Array.isArray(execPlan.steps) ? execPlan.steps : [];
+  const gateFailures = [];
+  /** @type {Object[]} */
+  const gateInvalid = [];
+
+  // ① preflight.ok
+  if (!execPlan.preflight || execPlan.preflight.ok !== true) {
+    gateFailures.push(`preflight.ok !== true（failures=${JSON.stringify((execPlan.preflight && execPlan.preflight.failures) || [])}）`);
+  }
+
+  // ②③④ 逐条复核 op（词表 → CREATE 白名单）与参数结构
+  const vocab = new Set(Object.keys(BRIDGE_COMMANDS));
+  const allowed = new Set(CREATE_ALLOWED_OPS);
+  const toCheck = [
+    ...steps.map((s) => ({ where: `step ${s.step}`, op: s.op, args: s.args || {}, step: s.step })),
+    ...(Array.isArray(execPlan.verify) ? execPlan.verify : [])
+      .map((v) => ({ where: `verify`, op: v.op, args: v.args || {}, step: null })),
+  ];
+  for (const it of toCheck) {
+    if (!vocab.has(it.op)) {
+      gateFailures.push(`${it.where} 的 op '${it.op}' 不在 BRIDGE_COMMANDS 词表内`);
+      continue;
+    }
+    if (!allowed.has(it.op)) {
+      gateFailures.push(`${it.where} 的 op '${it.op}' 在词表内但**不在 CREATE 白名单内**`
+        + '（删除类 / 发布类 / 截图等一律拒绝 —— 建页面不需要它们）');
+      continue;
+    }
+    const v = validateStepArgs(it.op, it.args);
+    if (!v.ok) {
+      const parts = [];
+      if (v.missing.length) parts.push(`缺少必填参数 ${v.missing.join('/')}`);
+      for (const e of v.typeErrors) parts.push(`参数 ${e.param} 类型应为 ${e.expected}，实际 ${e.actual}`);
+      gateInvalid.push({
+        step: it.step, op: it.op, missing: v.missing, typeErrors: v.typeErrors,
+        reason: `${it.where} 的 ${it.op} 参数不合规：${parts.join('；')}`,
+      });
+    }
+  }
+
+  if (gateFailures.length || gateInvalid.length) {
+    report.status = 'refused';
+    report.invalidSteps = gateInvalid;
+    report.reason = [
+      ...(gateFailures.length ? [`最终门禁未通过：${gateFailures.join('；')}`] : []),
+      ...(gateInvalid.length ? [`参数复核不合规：${gateInvalid.map((x) => x.reason).join('；')}`] : []),
+    ].join(' ｜ ');
+    return { report };
+  }
+
   if (!transport || typeof transport.send !== 'function') {
     report.reason = 'transport 缺失或没有 send(op,args) 方法（真实 Bridge 适配层尚未实现）';
     return { report };
   }
 
   // ── ② 逐步执行：第一条失败即停 ──
-  const steps = Array.isArray(execPlan.steps) ? execPlan.steps : [];
   let stopped = false;
   let stoppedAt = null;
   for (const step of steps) {

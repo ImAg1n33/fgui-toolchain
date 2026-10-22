@@ -305,3 +305,166 @@ test('★ transport 抛异常 → 按失败处理（不崩、不继续）', asyn
   assert.ok(/transport boom/.test(report.steps[0].error));
   assert.deepEqual(calls, ['create_component'], '异常后不得继续');
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// P0-A：回读的引用比对必须**归一化**（同包短 ID / 拼接 / 斜杠 指的都是同一个资源）
+// ════════════════════════════════════════════════════════════════════════════
+
+/** 只含一张背景图的真实 execPlan（便于单独验证 url 归一化）。 */
+function singleImageExec() {
+  const ir = {
+    version: '1.0',
+    source: { canvas: { w: 750, h: 1334 } },
+    layers: [{
+      id: 'L1', name: '背景', type: 'raster', bbox: {
+        x: 0, y: 0, w: 750, h: 1334,
+      }, visible: true, opacity: 1,
+    }],
+  };
+  const projectIndex = {
+    version: '1.0',
+    project: { packages: [{ name: 'Mail', id: PKG_ID }] },
+    resources: [{
+      pkg: 'Mail', pkgId: PKG_ID, id: 'q0jse', name: '背景.png', type: 'image', exported: true, width: 750, height: 1334,
+    }],
+    components: [],
+  };
+  return buildExecPlan(buildCreatePlan({ ir, projectIndex, pageName: 'MailPagePopup' }), {
+    pkgId: PKG_ID, packages: projectIndex.project.packages, resources: projectIndex.resources,
+  }).execPlan;
+}
+
+/** 回读 XML：只有一张背景图，src 由测试给定。 */
+function xmlWithSrc(src) {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<component size="750,1334">',
+    '  <displayList>',
+    `    <image id="b00001" name="img_bg" src="${src}" xy="0,0" size="750,1334"/>`,
+    '  </displayList>',
+    '</component>',
+    '',
+  ].join('\n');
+}
+
+test('★ P0-A ① 同包短 ID（真实 FairyGUI 写法）→ 判一致，不得误报 verify-failed', async () => {
+  const ep = singleImageExec();
+  assert.equal(ep.verify[0].expect.children[0].url, `ui://${PKG_ID}q0jse`, '前置：expect 是拼接 ui://');
+  const { report } = await runExecPlan(ep, fakeTransport({ readXml: xmlWithSrc('q0jse') }));
+  assert.equal(report.status, 'ok', `同包短 ID 必须判一致：${JSON.stringify(report.verify[0].diffs)}`);
+  assert.deepEqual(report.verify[0].diffs, []);
+});
+
+test('★ P0-A ② 拼接 ui:// → 判一致', async () => {
+  const { report } = await runExecPlan(singleImageExec(), fakeTransport({ readXml: xmlWithSrc(`ui://${PKG_ID}q0jse`) }));
+  assert.equal(report.status, 'ok');
+});
+
+test('★ P0-A ③ 斜杠 ui:// → 判一致', async () => {
+  const { report } = await runExecPlan(singleImageExec(), fakeTransport({ readXml: xmlWithSrc(`ui://${PKG_ID}/q0jse`) }));
+  assert.equal(report.status, 'ok');
+});
+
+test('★ P0-A ④ 确实是不同资源 → 判不一致，且 diff 用归一化后的值（不是原始字符串）', async () => {
+  const { report } = await runExecPlan(singleImageExec(), fakeTransport({ readXml: xmlWithSrc('other') }));
+  assert.equal(report.status, 'verify-failed');
+  const d = report.verify[0].diffs[0];
+  assert.equal(d.field, 'url');
+  assert.equal(d.expected, `${PKG_ID}/q0jse`, 'diff 期望值应为归一化后的 pkgId/itemId');
+  assert.equal(d.actual, `${PKG_ID}/other`);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// P0-B：Runner 自己再过一道最终门禁（不信任 exec_plan 的自述）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0-B ① 篡改自述（executable=true 但 preflight.ok=false）→ refused', async () => {
+  const calls = [];
+  const ep = realExec();
+  ep.preflight = { ok: false, failures: [{ code: 'TAMPERED', detail: '人为改坏' }] };
+  // executable 仍保持 true —— 正是"自述不可信"的场景
+  assert.equal(ep.executable, true);
+  const { report } = await runExecPlan(ep, fakeTransport({ calls }));
+  assert.equal(report.status, 'refused');
+  assert.ok(/preflight\.ok/.test(report.reason));
+  assert.deepEqual(calls, []);
+});
+
+test('★ P0-B ② 手工塞一个词表外的 op → refused 且点名该命令', async () => {
+  const calls = [];
+  const ep = realExec();
+  ep.steps.push({
+    step: ep.steps.length + 1, op: 'nuke_everything', args: {}, source: { tempId: 'X' },
+  });
+  const { report } = await runExecPlan(ep, fakeTransport({ calls }));
+  assert.equal(report.status, 'refused');
+  assert.ok(/nuke_everything/.test(report.reason), '必须点名被拒的命令');
+  assert.ok(/不在 BRIDGE_COMMANDS 词表内/.test(report.reason));
+  assert.deepEqual(calls, []);
+});
+
+test('★ P0-B ③ 词表内但不在 CREATE 白名单（publish / 删除类）→ refused', async () => {
+  const calls = [];
+  const ep = realExec();
+  ep.steps.push({
+    step: ep.steps.length + 1, op: 'publish', args: { pkg: 'Mail' }, source: { tempId: 'X' },
+  });
+  const { report } = await runExecPlan(ep, fakeTransport({ calls }));
+  assert.equal(report.status, 'refused');
+  assert.ok(/不在 CREATE 白名单内/.test(report.reason), `应因白名单被拒：${report.reason}`);
+
+  const calls2 = [];
+  const ep2 = realExec();
+  ep2.steps.push({
+    step: ep2.steps.length + 1, op: 'delete_item', args: { pkg: 'Mail', name: 'x' }, source: { tempId: 'X' },
+  });
+  const r2 = await runExecPlan(ep2, fakeTransport({ calls: calls2 }));
+  assert.equal(r2.report.status, 'refused', '删除类命令一律拒绝');
+  assert.deepEqual(calls2, []);
+});
+
+test('★ P0-B ④ 参数被改坏 → 进 invalidSteps 并 refused', async () => {
+  const calls = [];
+  const ep = realExec();
+  const txt = ep.steps.find((s) => s.op === 'insert_text');
+  txt.args.child = 123; // 改坏：child 必须是字符串
+  const { report } = await runExecPlan(ep, fakeTransport({ calls }));
+  assert.equal(report.status, 'refused');
+  assert.ok(Array.isArray(report.invalidSteps) && report.invalidSteps.length === 1);
+  assert.ok(/child/.test(report.invalidSteps[0].reason));
+  assert.deepEqual(calls, []);
+});
+
+test('★ P0-B ⑤ 干净清单 → 照常执行（门禁不误伤）', async () => {
+  const { report } = await runExecPlan(realExec(), fakeTransport());
+  assert.equal(report.status, 'ok');
+  assert.equal(report.summary.executed, report.summary.steps);
+  assert.deepEqual(report.invalidSteps, undefined);
+});
+
+test('★ P0-B ⑥ 所有 refused 场景 transport 零调用（回归汇总）', async () => {
+  const cases = [];
+  // a) executable=false
+  cases.push(buildExecPlan(realPlan(), { pkgId: 'zzzz9999', packages: [{ name: 'Mail', id: PKG_ID }] }).execPlan);
+  // b) required unsupported
+  cases.push(buildExecPlan(realPlan()).execPlan);
+  // c) preflight 被改坏
+  const c = realExec();
+  c.preflight = { ok: false, failures: [] };
+  cases.push(c);
+  // d) 词表外 op
+  const d = realExec();
+  d.steps.push({ step: 99, op: 'bogus', args: {} });
+  cases.push(d);
+  // e) 白名单外 op
+  const e = realExec();
+  e.steps.push({ step: 99, op: 'screenshot', args: { path: 'C:/x.png' } });
+  cases.push(e);
+
+  for (const ep of cases) {
+    const calls = [];
+    const { report } = await runExecPlan(ep, fakeTransport({ calls }));
+    assert.equal(report.status, 'refused', `该场景必须 refused：${report.reason}`);
+    assert.deepEqual(calls, [], 'refused 时一次都不许调 transport');
+  }
+});
