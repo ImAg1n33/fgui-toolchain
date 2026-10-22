@@ -404,6 +404,8 @@ function buildExecPlan(plan, options = {}) {
   const invalidSteps = [];
   /** @type {Object[]} */
   const deferred = [];
+  /** @type {string[]} 不影响 executable、但必须让人看见的说明（如"跳过某项交叉核对"） */
+  const advisories = [];
   /** 已成功计划的子节点（供 verify 的 expect 推导） */
   const plannedChildren = [];
 
@@ -486,27 +488,51 @@ function buildExecPlan(plan, options = {}) {
       args = { pkg, name: pageName, url: `ui://${pkgId}${src}`, index: indexCursor };
       if (xy) { args.x = xy[0]; args.y = xy[1]; }
       // ★ ATTR_MAPPING.sizeToProps：insert_object 没有 width/height 参数 → props.size
+      // ★ 节点名：insert_object **没有 `child` 参数**（基线里也**没有** rename 命令）★
+      //   只能把名字塞进 `props.name` 尽力而为（`applyProps` → `docElement.SetProperty`）。
+      //   基线**未声明**该属性是否被编辑器接受 → 故 **verify 不得按名断言**（见 ⑤）。
       const props = {};
+      props.name = node.name || tempId;
       if (size) props.size = `${size[0]},${size[1]}`;
-      if (Object.keys(props).length) args.props = props;
+      // 其余 attrs（如 scale9grid）也没有具名参数 → 进 props，绝不静默丢弃
+      const mappedImg = new Set(['xy', 'size', 'src']);
+      const restImg = {};
+      for (const k of Object.keys(attrs)) if (!mappedImg.has(k)) restImg[k] = attrs[k];
+      Object.assign(props, restImg);
+      args.props = props;
       if (!xy) notes.push('缺少 xy：insert_object 未给坐标，由编辑器默认放置');
+      notes.push('insert_object 无 child 参数：节点名经 props.name 尽力传递；'
+        + '基线未声明该属性是否被编辑器接受 —— 若被忽略，编辑器会自命名，'
+        + '故回读按 index+url 校验（不按名字）');
     } else if (tag === 'text') {
       args = { pkg, name: pageName, child: node.name || tempId, index: indexCursor };
       if (typeof attrs.text === 'string') args.text = attrs.text;
       if (xy) { args.x = xy[0]; args.y = xy[1]; }
       // ★ ATTR_MAPPING.sizeToWidthHeight：insert_text 有 width/height 参数
       if (size) { args.width = size[0]; args.height = size[1]; }
-      for (const k of ATTR_MAPPING.direct) {
-        if (attrs[k] === undefined || ['text', 'url', 'defaultItem', 'layout', 'overflow', 'items'].includes(k)) continue;
-        args[k] = k === 'fontSize' || k === 'strokeSize' ? Number(attrs[k]) : attrs[k];
+      // ★★ P0-A：XML 属性习惯小写（`fontsize`），Bridge 参数是驼峰（`fontSize`）★★
+      //   故用**大小写不敏感的归一到命令参数名**，不再依赖手写的属性清单。
+      //   （这正是第八轮抓到的 P0：`fontsize` 只落进 props，`insert_text` 真正认的
+      //     `fontSize` 没被赋值 → 字号可能不生效。）
+      const params = COMMAND_SCHEMA[cmd];
+      const lowerToParam = new Map(Object.keys(params.types || {}).map((p) => [p.toLowerCase(), p]));
+      const reserved = new Set(['pkg', 'name', 'child', 'index', 'props']);
+      const mapped = new Set(['xy', 'size']);
+      for (const k of Object.keys(attrs)) {
+        if (k === 'xy' || k === 'size') continue;
+        const param = lowerToParam.get(k.toLowerCase());
+        if (param && !reserved.has(param)) {
+          const t = params.types[param];
+          args[param] = (t === T.NUMBER && typeof attrs[k] === 'string') ? Number(attrs[k]) : attrs[k];
+          mapped.add(k);
+        }
       }
-      // 其余 attrs 没有对应具名参数 → 走 props，绝不静默丢弃
-      const mapped = new Set(['xy', 'size', ...ATTR_MAPPING.direct]);
+      // 其余 attrs（没有对应具名参数的，如 alpha）→ 走 props，绝不静默丢弃
       const rest = {};
       for (const k of Object.keys(attrs)) if (!mapped.has(k)) rest[k] = attrs[k];
       if (Object.keys(rest).length) {
         args.props = rest;
-        notes.push(`未具名映射的 attrs 已放进 props：${Object.keys(rest).join(',')}`);
+        notes.push(`无具名参数的 attrs 已放进 props：${Object.keys(rest).join(',')}`);
       }
       if (attrs.estimated === true) notes.push('attrs.estimated=true：含估计值，需人工确认');
     } else if (tag === 'loader') {
@@ -524,9 +550,16 @@ function buildExecPlan(plan, options = {}) {
 
     const status = emit(cmd, args, { tempId }, notes, true);
     if (status === 'ok') {
+      const childIndex = indexCursor;
       indexCursor += 1;
       plannedChildren.push({
         name: node.name || tempId,
+        // ★ P0-B：只有 `insert_text` / `insert_loader` / `insert_list` 有 `child` 参数，
+        //   `insert_object` **没有** → 图片节点名不保证，回读不得按名断言。
+        nameGuaranteed: tag !== 'image',
+        index: childIndex,
+        url: tag === 'image' && args && args.url ? args.url : null,
+        src: tag === 'image' && typeof attrs.src === 'string' ? attrs.src : null,
         xy: typeof attrs.xy === 'string' ? attrs.xy : null,
         size: typeof attrs.size === 'string' ? attrs.size : null,
       });
@@ -557,15 +590,34 @@ function buildExecPlan(plan, options = {}) {
   }
 
   // ── ⑤ 结果回读（verify）：命令 ok ≠ 做对了 ──
+  //
+  // ★ P0-B：**回读不得自欺** ★
+  //   `insert_object` 没有 `child` 参数（基线也没有 rename 命令），图片节点名**不保证**。
+  //   故 verify 的 expect 里：名字可保证的节点（text/loader/list）才按 name 比对；
+  //   图片只按 `index` + `url` 比对 —— **绝不出现"计划叫 img_bg、实际叫 image1、却按 img_bg 断言"**。
   const verify = [];
-  const siblings = plannedChildren.map((c) => (c.size ? { name: c.name, xy: c.xy, size: c.size } : { name: c.name, xy: c.xy }));
+  const children = plannedChildren.map((c) => {
+    const out = { index: c.index };
+    if (c.nameGuaranteed) out.name = c.name;
+    if (c.url) out.url = c.url;
+    if (c.xy) out.xy = c.xy;
+    if (c.size) out.size = c.size;
+    return out;
+  });
+  const guaranteedNames = plannedChildren.filter((c) => c.nameGuaranteed).map((c) => c.name);
+  const unguaranteed = plannedChildren.filter((c) => !c.nameGuaranteed);
+  if (unguaranteed.length) {
+    advisories.push(`有 ${unguaranteed.length} 个图片节点的名字无法保证（insert_object 无 child 参数，`
+      + '基线也无 rename 命令）：回读按 index+url 校验，不按名字。'
+      + '若朋友侧确认 props.name 被编辑器接受，可再收紧为按名校验。');
+  }
   if (vocab.has('read_component')) {
     verify.push({
       op: 'read_component',
       args: { pkg, name: pageName },
       expect: {
         childCount: plannedChildren.length,
-        children: siblings,
+        children,
       },
       compare: ['childCount', 'children'],
     });
@@ -574,11 +626,11 @@ function buildExecPlan(plan, options = {}) {
     verify.push({
       op: 'list_children',
       args: { pkg, name: pageName },
-      expect: { childCount: plannedChildren.length, names: plannedChildren.map((c) => c.name) },
-      compare: ['childCount', 'names'],
+      expect: { childCount: plannedChildren.length, nameGuaranteedNames: guaranteedNames },
+      compare: ['childCount', 'nameGuaranteedNames'],
     });
     addUnsupported({ tempId: null },
-      '词表里没有 read_component，回读降级为 list_children（拿不到 xy/size，只能校验数量与名字）', false);
+      '词表里没有 read_component，回读降级为 list_children（拿不到 xy/size，且图片名不可断言）', false);
   } else {
     addUnsupported({ tempId: null },
       '词表里没有任何可用的回读命令（read_component / list_children 都不在）—— 无法回读验证，'
@@ -586,18 +638,12 @@ function buildExecPlan(plan, options = {}) {
   }
 
   // ── ⑥ preflight：本地能判的只有这些；运行时事项另列 ──
+  //
+  // ★ P1：**不盲信 plan 的自述** ★ —— plan 是人工可编辑的 JSON。
+  //   `readiness` 只作参考：自称 ready 不能绕过下面任何一条本地复算；
+  //   自称非 ready 则按 **fail-closed** 拦下（保守方向）。见本段末尾。
   const failures = [];
-  const readinessStatus = plan.readiness && typeof plan.readiness === 'object'
-    ? plan.readiness.status
-    : null;
-  if (readinessStatus !== 'ready') {
-    failures.push({
-      code: 'READINESS_NOT_READY',
-      detail: readinessStatus
-        ? `plan.readiness.status='${readinessStatus}'（要求 'ready'）`
-        : 'plan 缺少 readiness.status（要求 \'ready\'）—— 不接受"未评估"的计划直接执行',
-    });
-  }
+
   const requiredUnsupported = unsupported.filter((u) => u.required);
   if (requiredUnsupported.length) {
     failures.push({
@@ -621,6 +667,68 @@ function buildExecPlan(plan, options = {}) {
     });
   }
 
+  // ① pkgId：不仅非空，还要位数正确、且在工程包清单里
+  const pkgIdLength = Number.isFinite(options.pkgIdLength) ? options.pkgIdLength : 8;
+  const packages = Array.isArray(options.packages) ? options.packages : null;
+  if (pkgId) {
+    if (pkgId.length !== pkgIdLength) {
+      failures.push({
+        code: 'PKGID_INVALID',
+        detail: `pkgId '${pkgId}' 长度 ${pkgId.length}，应为 ${pkgIdLength} 位（FairyGUI 编码 URL 要求 8 位）`,
+      });
+    }
+    if (packages) {
+      const ids = packages.map((p) => p && p.id).filter(Boolean).map(String);
+      if (!ids.includes(pkgId)) {
+        failures.push({
+          code: 'PKGID_UNKNOWN',
+          detail: `pkgId '${pkgId}' 不在工程包清单里（已知：${ids.join(', ') || '(空)'}）—— 可能拿错了包 id`,
+        });
+      }
+    } else {
+      advisories.push('未提供 options.packages —— 已跳过「pkgId 是否存在于工程包清单」的交叉核对');
+    }
+  }
+
+  // ② 图片短 ID：与目标包登记表**再核对一次**（plan 可能被人改过）
+  const registry = options.resources
+    ? new Set((Array.isArray(options.resources) ? options.resources : [])
+      .map((r) => (typeof r === 'string' ? r : (r && r.id)))
+      .filter(Boolean)
+      .map(String))
+    : null;
+  if (registry) {
+    const missingRes = plannedChildren.filter((c) => c.src && !registry.has(c.src));
+    if (missingRes.length) {
+      failures.push({
+        code: 'RESOURCE_NOT_REGISTERED',
+        detail: `${missingRes.length} 个图片短 ID 不在目标包登记表里：${missingRes.map((c) => c.src).join(', ')}`
+          + ' —— plan 可能被人改过，或资源尚未登记',
+      });
+    }
+  } else {
+    advisories.push('未提供 options.resources（目标包登记表）—— 已跳过「图片短 ID 是否已登记」的交叉核对');
+  }
+
+  // ③ readiness：参考值，不盲信
+  const readinessStatus = plan.readiness && typeof plan.readiness === 'object'
+    ? plan.readiness.status
+    : null;
+  if (readinessStatus !== 'ready') {
+    failures.push({
+      code: 'READINESS_NOT_READY',
+      detail: readinessStatus
+        ? `plan.readiness.status='${readinessStatus}'（要求 'ready'）`
+        : 'plan 缺少 readiness.status（要求 \'ready\'）—— 不接受"未评估"的计划直接执行',
+    });
+    if (failures.length === 1) {
+      advisories.push('plan 自称非 ready，但本地复算未发现问题 —— 仍按 fail-closed 拦下，请人工确认'
+        + '（plan 是人工可编辑的，readiness 只作参考）');
+    }
+  } else if (failures.length) {
+    advisories.push('plan 自称 ready，但本地复算发现阻塞项 —— **以本地复算为准**（不盲信 plan.readiness）');
+  }
+
   const execPlan = {
     version: EXEC_VERSION,
     target: { pkg, page: pageName, canvas: { w: canvas.w, h: canvas.h } },
@@ -628,6 +736,7 @@ function buildExecPlan(plan, options = {}) {
     invalidSteps,
     unsupported,
     deferred,
+    advisories,
     verify: verify.map((v) => ({ ...v, onMismatch: 'fail' })),
     preflight: { ok: failures.length === 0, failures },
     executable: failures.length === 0,

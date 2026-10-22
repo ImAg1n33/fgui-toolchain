@@ -205,9 +205,16 @@ test('★ ⑤ 干净 plan → executable=true，verify.childCount=节点数、�
   assert.deepEqual(v.args, { pkg: 'Mail', name: 'MailPagePopup' });
   assert.equal(v.onMismatch, 'fail', '回读不一致必须报失败，不许"命令 ok 就算成功"');
   assert.equal(v.expect.childCount, 2, 'childCount 应等于计划中的节点数');
-  assert.deepEqual(v.expect.children.map((c) => c.name), ['img_bg', 'txt_title'],
-    '回读顺序必须与 layer 升序一致（底→顶）');
-  assert.deepEqual(v.expect.children[0], { name: 'img_bg', xy: '0,0', size: '750,1334' });
+  // ★ P0-B：图片节点名不可保证（insert_object 无 child）→ 只按 index+url 比对，**不含 name**
+  const [bg, title] = v.expect.children;
+  assert.equal(bg.name, undefined, '图片节点不得按名字断言（否则就是自欺）');
+  assert.equal(bg.index, 0);
+  assert.equal(bg.url, `ui://${PKG_ID}q0jse`);
+  assert.deepEqual({ xy: bg.xy, size: bg.size }, { xy: '0,0', size: '750,1334' });
+  // 文本有 child 参数 → 名字可保证，按名断言
+  assert.equal(title.name, 'txt_title');
+  assert.deepEqual({ xy: title.xy, size: title.size }, { xy: '40,100', size: '300,40' });
+  assert.deepEqual(v.expect.children.map((c) => c.index), [0, 1], '回读顺序必须与 layer 升序一致（底→顶）');
 });
 
 test('★ ⑤ 词表删掉 read_component → 回读降级为 list_children(required:false)，**不**改变 executable', () => {
@@ -215,7 +222,8 @@ test('★ ⑤ 词表删掉 read_component → 回读降级为 list_children(requ
   const { execPlan } = buildExecPlan(cleanPlan(), { pkgId: PKG_ID, vocab });
   assert.equal(execPlan.verify.length, 1);
   assert.equal(execPlan.verify[0].op, 'list_children', '降级到词表里另一条真实回读命令');
-  assert.deepEqual(execPlan.verify[0].expect.names, ['img_bg', 'txt_title']);
+  assert.deepEqual(execPlan.verify[0].expect.nameGuaranteedNames, ['txt_title'],
+    '只有名字可保证的节点才进名单（图片不可按名断言）');
   const u = execPlan.unsupported.find((x) => /read_component/.test(x.reason));
   assert.ok(u, '降级必须显式记录，不静默');
   assert.equal(u.required, false, '回读能力缺失不是构建失败');
@@ -250,7 +258,10 @@ test('★ args 映射：图片走 ui://<pkgId><itemId>（拼接），size 走 pr
   assert.equal(img.args.url, `ui://${PKG_ID}q0jse`);
   assert.equal(img.args.x, 0);
   assert.equal(img.args.y, 0);
-  assert.deepEqual(img.args.props, { size: '750,1334' }, 'insert_object 无 width/height → 尺寸走 props');
+  assert.deepEqual(img.args.props.size, '750,1334', 'insert_object 无 width/height → 尺寸走 props');
+  // P0-B：insert_object 无 child 参数 → 名字只能经 props.name 尽力传递
+  assert.equal(img.args.props.name, 'img_bg', '节点名经 props.name 尽力传递');
+  assert.equal(img.args.child, undefined, 'insert_object 没有 child 参数，不得伪造');
   assert.equal(img.args.index, 0);
 
   const txt = execPlan.steps.find((s) => s.op === 'insert_text');
