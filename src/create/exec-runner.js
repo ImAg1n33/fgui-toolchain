@@ -140,7 +140,12 @@ function compareVerify(v, res) {
  * @param {Object} execPlan buildExecPlan 的产物
  * @param {{send:(op:string,args:Object)=>Promise<{ok:boolean,data?:any,error?:string}>}} transport
  * @param {Object} [opts]
- * @param {boolean} [opts.timing=false] 是否在报告里输出每步耗时（默认**不输出**，保证确定性）
+ * @param {boolean} [opts.timing=false] 是否在报告里输出每步耗时。
+ *   ★ 耗时只能通过 `opts.now` **注入的时钟**测量 ★ —— 本模块**不得**自带时钟：
+ *     K1 守卫（`test/unit/net-guard.test.js`）**静态**禁止 `src/` 里出现时间戳 API
+ *     （它 grep 的是源码字面量，不看运行时条件）—— 因为"确定性"不能靠自觉保证：
+ *     默认行为正确但源码里留着时间戳 API，下一个人改个默认值就破功。故：`timing=false` 或未提供 `now` → **不计时、报告里无 `ms`**。
+ * @param {() => number} [opts.now] 可选注入的时钟（测试用假时钟即可保证耗时也是确定值）
  * @returns {Promise<{report:Object}>}
  */
 async function runExecPlan(execPlan, transport, opts = {}) {
@@ -192,23 +197,21 @@ async function runExecPlan(execPlan, transport, opts = {}) {
     const rec = {
       step: step.step, op: step.op, ok: false, result: null, error: null, skipped: stopped,
     };
-    if (timing) rec.ms = null;
 
     if (stopped) {
       report.steps.push(rec);
       continue;
     }
 
-    // ★ 只用单调时钟（process.hrtime）★：不用 Date.now —— K1 守卫禁止 src/ 里出现
-    //   时间戳（且 wall-clock 不是耗时该用的东西）。默认根本不计时（保证确定性）。
-    const t0 = timing ? process.hrtime.bigint() : 0n;
+    const now = timing && typeof opts.now === 'function' ? opts.now : null;
+    const t0 = now ? now() : 0;
     let res = null;
     try {
       res = await transport.send(step.op, step.args || {});
     } catch (err) {
       res = { ok: false, error: err && err.message ? err.message : String(err) };
     }
-    if (timing) rec.ms = Number((process.hrtime.bigint() - t0) / 1000000n);
+    if (now) rec.ms = now() - t0;
 
     if (res && res.ok) {
       rec.ok = true;

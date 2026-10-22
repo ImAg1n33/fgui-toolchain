@@ -241,9 +241,32 @@ test('★ 5) 确定性：同一假 transport 跑两遍，报告 md5 一致（默
   for (const s of a.report.steps) assert.equal(s.ms, undefined, '默认不得输出耗时');
 });
 
-test('★ 5) opts.timing=true 才允许输出耗时（且因此报告不再逐字节一致）', async () => {
+test('★ 5) opts.timing + 注入假时钟 → 输出 ms，且耗时是**确定值**（不自带时钟）', async () => {
+  let t = 0;
+  const fakeClock = () => { t += 5; return t; };
+  const { report } = await runExecPlan(realExec(), fakeTransport(), { timing: true, now: fakeClock });
+  for (const s of report.steps) assert.equal(s.ms, 5, '耗时应由注入的时钟决定（确定值）');
+  // 再跑一遍：假时钟行为相同 → ms 完全一致
+  let t2 = 0;
+  const again = await runExecPlan(realExec(), fakeTransport(), {
+    timing: true, now: () => {
+      t2 += 5;
+      return t2;
+    },
+  });
+  assert.deepEqual(again.report.steps.map((s) => s.ms), report.steps.map((s) => s.ms));
+});
+
+test('★ 5) 只开 timing 但**不注入**时钟 → 不计时（源码里不允许有任何自带时钟）', async () => {
   const { report } = await runExecPlan(realExec(), fakeTransport(), { timing: true });
-  for (const s of report.steps) assert.equal(typeof s.ms, 'number');
+  for (const s of report.steps) assert.equal(s.ms, undefined, '没有注入时钟就不该有 ms');
+});
+
+test('★ K1: src/create/exec-runner.js 里不得出现 Date.now 字面量（与 net-guard 同口径）', () => {
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, '../../src/create/exec-runner.js'), 'utf8',
+  );
+  assert.ok(!/Date\.now/.test(src), 'runner 不得自带时钟 —— 时钟必须注入');
 });
 
 // ────────────────────────────────────────────────────────────────────────────
