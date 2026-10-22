@@ -70,12 +70,12 @@ function irFixture() {
 function indexFixture() {
   return {
     version: '1.0',
-    project: { name: 'P', packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
+    project: { name: 'P', packages: [{ name: 'Mail', id: 'mailpkg1' }] },
     resources: [
       // 按钮底：名字与图层名一致，尺寸与 bbox 一致 → 正常复用
-      { pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0abc', name: '按钮底.png', exported: 'true', width: 200, height: 56, scale: null, scale9grid: null },
+      { pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0abc', name: '按钮底.png', exported: 'true', width: 200, height: 56, scale: null, scale9grid: null },
       // 图标：固有 96x96，与 bbox 48x48 不一致 → non-uniform-scale
-      { pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ico', name: '图标.png', exported: 'true', width: 96, height: 96, scale: null, scale9grid: null },
+      { pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0ico', name: '图标.png', exported: 'true', width: 96, height: 96, scale: null, scale9grid: null },
     ],
     components: [],
   };
@@ -237,7 +237,7 @@ test('★ 等比缩放（宽高比相同）: bbox 48x48 / 固有 96x96 → size 
   // 第六轮审查：纯等比缩放是**已自动处理**，不该判 blocked。
   const idx = indexFixture();
   idx.resources.push({
-    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic2', name: '小图标.png',
+    pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0ic2', name: '小图标.png',
     exported: 'true', width: 96, height: 96,
   });
   const ir = irFixture();
@@ -259,7 +259,7 @@ test('★ 等比缩放（宽高比相同）: bbox 48x48 / 固有 96x96 → size 
 test('★ 等比缩放（scale 截断为 1）: bbox 200x200 / 固有 96x96 → size 96,96 + 居中，仍不进 unresolved', () => {
   const idx = indexFixture();
   idx.resources.push({
-    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic3', name: '大框小图.png',
+    pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0ic3', name: '大框小图.png',
     exported: 'true', width: 96, height: 96,
   });
   const ir = irFixture();
@@ -276,7 +276,7 @@ test('★ 等比缩放（scale 截断为 1）: bbox 200x200 / 固有 96x96 → s
 test('★ 宽高比不同: bbox 120x48 / 固有 96x96 → decisions + unresolved(aspect-mismatch-adjusted, needs-human)', () => {
   const idx = indexFixture();
   idx.resources.push({
-    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ic4', name: '异形.png',
+    pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0ic4', name: '异形.png',
     exported: 'true', width: 96, height: 96,
   });
   const ir = irFixture();
@@ -297,7 +297,7 @@ test('★ 宽高比不同: bbox 120x48 / 固有 96x96 → decisions + unresolved
 test('九宫格: 摆放 > 固有 且资源具备 9grid → 建议 scale9grid（无切格值不猜）', () => {
   const idx = indexFixture();
   idx.resources.push({
-    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0bg9', name: '底板.png',
+    pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0bg9', name: '底板.png',
     exported: 'true', width: 100, height: 100, scale: '9grid', scale9grid: '10,10,80,80',
   });
   const ir = irFixture();
@@ -311,7 +311,7 @@ test('九宫格: 摆放 > 固有 且资源具备 9grid → 建议 scale9grid（�
 test('九宫格: 标为 9grid 但无切格值 → 保守用固有尺寸 + unresolved（不猜）', () => {
   const idx = indexFixture();
   idx.resources.push({
-    pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ng', name: '无格.png',
+    pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0ng', name: '无格.png',
     exported: 'true', width: 100, height: 100, scale: '9grid', scale9grid: null,
   });
   const ir = irFixture();
@@ -325,8 +325,8 @@ test('九宫格: 标为 9grid 但无切格值 → 保守用固有尺寸 + unreso
 test('资源歧义: 同名两候选 → 不取第一个，进 unresolved(ambiguous-asset)', () => {
   const idx = indexFixture();
   idx.resources.push(
-    { pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0d1', name: '行1.png', exported: 'true', width: 300, height: 60 },
-    { pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0d2', name: '行1.jpg', exported: 'true', width: 300, height: 60 },
+    { pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0d1', name: '行1.png', exported: 'true', width: 300, height: 60 },
+    { pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0d2', name: '行1.jpg', exported: 'true', width: 300, height: 60 },
   );
   const plan = build({ projectIndex: idx });
   const u = plan.unresolved.find((x) => x.layerId === 'L005');

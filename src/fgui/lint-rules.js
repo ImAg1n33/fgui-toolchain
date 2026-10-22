@@ -49,7 +49,7 @@ const { sortBy } = require('../core/determinism');
 const { computeGrid9 } = require('../imaging/grid9');
 // ★ R-04 改用共享解析器（同时支持 slash 与 concat 两种 ui:// 风格）★
 //   M2-SPEC §4.2 ⑩：真实 FairyGUI 6.1.4 工程的引用是**拼接无斜杠**
-//   （如 `ui://mtlga5qj8yoa8k`）；R-04 原先自写的只认 slash 的正则会把整串当包 id
+//   （如 `ui://mailpkg1item001`）；R-04 原先自写的只认 slash 的正则会把整串当包 id
 //   （14 位）→ 把合法引用判成「包 id 不是 8 位」+「缺少 itemId」两个 error。
 const { parseUiRef } = require('./resource-resolver');
 const {
@@ -132,7 +132,7 @@ function lookupResource(resMap, ref) {
  * ★ 为什么需要它（PATCH 兼容缺口，2026-10-21）★
  *   改造前 R-05/R-10 用 `firstUiRef()`，后者只认 `/^ui:\/\//`：
  *     · 真实工程 `<image src="q0jse">`（**短资源 ID**）→ ref=null → **尺寸检查直接跳过**；
- *     · 真实工程 `ui://mtlga5qj8yoa8k`（**拼接无斜杠**）→ `lookupResource` 的
+ *     · 真实工程 `ui://mailpkg1item001`（**拼接无斜杠**）→ `lookupResource` 的
  *       `tail = ref.split('/').pop()` 拿到的是整串 → **同样命不中**。
  *   两者叠加的后果：九宫格那套保护（R-10 的胶囊事故防线）在真实工程形态下**静默失效**。
  *
@@ -457,8 +457,8 @@ function checkColors(ctx) {
 // ---- R-04：ui:// 包 id 位数校验（同时接受 slash 与 concat 两种风格）----
 //
 // ★ M2-SPEC §4.2 ⑩ 修正 ★
-//   真实 FairyGUI 6.1.4 工程的引用是**拼接无斜杠**：`ui://mtlga5qj8yoa8k`
-//   （pkgId=mtlga5qj, itemId=8yoa8k）。原实现自写正则 `/^ui:\/\/([^/]*)(?:\/(.*))?$/`
+//   真实 FairyGUI 6.1.4 工程的引用是**拼接无斜杠**：`ui://mailpkg1item001`
+//   （pkgId=mailpkg1, itemId=item001）。原实现自写正则 `/^ui:\/\/([^/]*)(?:\/(.*))?$/`
 //   会把整串当 pkgId（14 位）→ 报「包 id 不是 8 位」+「缺少 itemId」**两个 error**，
 //   把真实工程的**合法**引用判成错误。改用 `parseUiRef`（已同时支持两种风格），
 //   拆分规则：concat 形态取「前 pkgIdLength 位为包 id、其余为 itemId」。

@@ -72,10 +72,10 @@ function indexFixture() {
   return {
     version: '1.0',
     _comment: 'e2e 手写的最小索引：CREATE 模式只关心「同包已有什么图片资源」',
-    project: { name: 'MailPopup', packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
+    project: { name: 'MailPopup', packages: [{ name: 'Mail', id: 'mailpkg1' }] },
     resources: [
-      { pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0abc', name: '按钮底.png', exported: 'true', width: 200, height: 56 },
-      { pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0ico', name: '图标.png', exported: 'true', width: 96, height: 96 },
+      { pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0abc', name: '按钮底.png', exported: 'true', width: 200, height: 56 },
+      { pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0ico', name: '图标.png', exported: 'true', width: 96, height: 96 },
     ],
     components: [], // ★ 空：CREATE 不需要已有组件
   };

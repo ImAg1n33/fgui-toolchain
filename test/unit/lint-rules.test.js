@@ -642,10 +642,10 @@ test('★ 大写 UI:// 现在也走 R-04 包 id 校验（原绕过路径已闭�
 // 十、M2-SPEC §4.2 ⑩：R-04 同时接受两种 ui:// 风格 + R-11 短资源 ID 登记性
 // ════════════════════════════════════════════════════════════════════════════
 //
-// ★ 真实依据（FairyGUI 6.1.4 真实工程，包 mtlga5qj，非推测）★
+// ★ 真实依据（FairyGUI 6.1.4 真实工程，包 mailpkg1，非推测）★
 //   · 组件内 `<image src>` 引用同包图片用**短资源 ID**：`src="q0jse"`（不带 ui://）；
-//   · Loader 的 `url` / 列表 `defaultItem` 用**拼接无斜杠**：`ui://mtlga5qjls3rcl`。
-//   改前：R-04 自写正则只认 slash，把 `ui://mtlga5qj8yoa8k` 整串当 pkgId（14 位）
+//   · Loader 的 `url` / 列表 `defaultItem` 用**拼接无斜杠**：`ui://mailpkg1item002`。
+//   改前：R-04 自写正则只认 slash，把 `ui://mailpkg1item001` 整串当 pkgId（14 位）
 //   → 报「包 id 不是 8 位」+「缺少 itemId」**两个 error**，把合法引用判成错误。
 
 /** 造一个只含 displayList 内容的最小组件 XML。 */
@@ -664,8 +664,8 @@ function wrapDisplayList(lines) {
 test('★ R-04: concat（拼接无斜杠）引用必须通过 —— 真实工程写法不得被误判成 2 个 error', () => {
   // 真实样本三形态里可被 R-04 检到的两种（url / defaultItem）
   const xml = wrapDisplayList([
-    '    <loader id="b00001" name="icon_loader" url="ui://mtlga5qjls3rcl" xy="0,0" size="64,64"/>',
-    '    <list id="b00002" name="cells" xy="0,80" size="200,100" defaultItem="ui://mtlga5qjxqt5f"/>',
+    '    <loader id="b00001" name="icon_loader" url="ui://mailpkg1item002" xy="0,0" size="64,64"/>',
+    '    <list id="b00002" name="cells" xy="0,80" size="200,100" defaultItem="ui://mailpkg1item03"/>',
   ]);
   const r = lintComponentXml(xml, { resources: RESOURCES });
   const issues = byRule(r, 'R-04');
@@ -674,14 +674,14 @@ test('★ R-04: concat（拼接无斜杠）引用必须通过 —— 真实工�
 
   // 另一种真实写法：14 字符拼接（包 id 8 + itemId 6）
   const xml2 = wrapDisplayList([
-    '    <loader id="b00001" name="model" url="ui://mtlga5qj8yoa8k" xy="0,0" size="64,64"/>',
+    '    <loader id="b00001" name="model" url="ui://mailpkg1item001" xy="0,0" size="64,64"/>',
   ]);
   assert.deepEqual(byRule(lintComponentXml(xml2, { resources: RESOURCES }), 'R-04'), []);
 });
 
 test('★ R-04: slash 形态仍合法（两种风格并存，不互相排斥）', () => {
   const xml = wrapDisplayList([
-    '    <loader id="b00001" name="model" url="ui://mtlga5qj/8yoa8k" xy="0,0" size="64,64"/>',
+    '    <loader id="b00001" name="model" url="ui://mailpkg1/item001" xy="0,0" size="64,64"/>',
   ]);
   assert.deepEqual(byRule(lintComponentXml(xml, { resources: RESOURCES }), 'R-04'), []);
 });
@@ -743,7 +743,7 @@ test('★ R-11: resources 未注入 → 整条规则跳过（不产生噪声）'
 
 test('★ R-11: src 含 ui:// → 交给 R-04，本规则不重复报', () => {
   const xml = wrapDisplayList([
-    '    <image id="b00001" name="mail_bg" src="ui://mtlga5qj/a7b8c9d0" xy="0,0" size="100,50"/>',
+    '    <image id="b00001" name="mail_bg" src="ui://mailpkg1/a7b8c9d0" xy="0,0" size="100,50"/>',
   ]);
   const r = lintComponentXml(xml, { resources: RESOURCES });
   assert.deepEqual(byRule(r, 'R-11'), [], 'ui:// 形态不由 R-11 处理');
@@ -754,7 +754,7 @@ test('★ R-11: src 含 ui:// → 交给 R-04，本规则不重复报', () => {
 // 十一、font 引用纳入 R-04（专用清单 uiRefAttributes），但不污染 urlAttributes
 // ════════════════════════════════════════════════════════════════════════════
 //
-// 真实工程字体引用：`font="ui://mtlga5qj8yoa8k"`（拼接）。需要校验。
+// 真实工程字体引用：`font="ui://mailpkg1item001"`（拼接）。需要校验。
 // 但不能把 `font` 塞进 `urlAttributes` —— 那份清单被 R-05/R-10 用来
 // "找这个元素引用的图片去量宽高"，混进 font 会让 `<text font="ui://...">`
 // 被当成引用了一张图 → 新误报。
@@ -764,17 +764,17 @@ const { parseUiRef } = require('../../src/fgui/resource-resolver');
 test('★ parseUiRef: 含 "/" 一律按 slash 拆（6 位包 id 不再被 concat 硬切掩藏）', () => {
   assert.deepEqual(parseUiRef('ui://abc123/x'),
     { raw: 'ui://abc123/x', style: 'slash', pkgId: 'abc123', itemId: 'x' });
-  assert.deepEqual(parseUiRef('ui://mtlga5qj/8yoa8k'),
-    { raw: 'ui://mtlga5qj/8yoa8k', style: 'slash', pkgId: 'mtlga5qj', itemId: '8yoa8k' });
+  assert.deepEqual(parseUiRef('ui://mailpkg1/item001'),
+    { raw: 'ui://mailpkg1/item001', style: 'slash', pkgId: 'mailpkg1', itemId: 'item001' });
 });
 
 test('★ parseUiRef: 不含 "/" 才走 concat（真实工程写法）', () => {
-  assert.deepEqual(parseUiRef('ui://mtlga5qj8yoa8k'),
-    { raw: 'ui://mtlga5qj8yoa8k', style: 'concat', pkgId: 'mtlga5qj', itemId: '8yoa8k' });
+  assert.deepEqual(parseUiRef('ui://mailpkg1item001'),
+    { raw: 'ui://mailpkg1item001', style: 'concat', pkgId: 'mailpkg1', itemId: 'item001' });
   assert.deepEqual(parseUiRef('ui://e5f6a7b8a7b8c9d0'),
     { raw: 'ui://e5f6a7b8a7b8c9d0', style: 'concat', pkgId: 'e5f6a7b8', itemId: 'a7b8c9d0' });
   // 缺 itemId / 非 ui:// → null（不猜）
-  assert.equal(parseUiRef('ui://mtlga5qj'), null);
+  assert.equal(parseUiRef('ui://mailpkg1'), null);
   assert.equal(parseUiRef('reward_icon'), null);
   assert.equal(parseUiRef('ui://abc/'), null);
 });
@@ -795,7 +795,7 @@ test('★ R-04: font 引用（拼接）合法 → 不报', () => {
   const xml = [
     '<?xml version="1.0" encoding="utf-8"?>',
     '<component size="480,320" exported="true">',
-    '  <font id="f00001" name="main_font" font="ui://mtlga5qj8yoa8k"/>',
+    '  <font id="f00001" name="main_font" font="ui://mailpkg1item001"/>',
     '  <displayList>',
     '    <graph id="b00001" name="bg" xy="0,0" size="480,320"/>',
     '  </displayList>',

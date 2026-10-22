@@ -474,7 +474,7 @@ test('★ R-04: 包 id 不在索引包清单里 → warning（不是 error）', 
 // ════════════════════════════════════════════════════════════════════════════
 //
 // 改前：`firstUiRef` 只认 `^ui://` → `<image src="q0jse">`（短 ID）拿到 null；
-//       concat `ui://mtlga5qj8yoa8k` 因 lookupResource 的 tail 拆分也命不中
+//       concat `ui://mailpkg1item001` 因 lookupResource 的 tail 拆分也命不中
 //       → R-05/R-10 **静默跳过**（九宫格保护在真实工程形态下失效）。
 
 /** 单包工程索引：一张 100x50 的图，id='q0jse'，name='bg.png'。 */
@@ -502,13 +502,13 @@ test('★ 短 ID + scale9grid → R-05 能拿到尺寸并报越界（改前 ref=
 
 test('★ concat ui://（真实工程写法）+ scale9grid → 能解析到资源并报越界', () => {
   const idx = {
-    project: { packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
+    project: { packages: [{ name: 'Mail', id: 'mailpkg1' }] },
     resources: [{
-      pkg: 'Mail', pkgId: 'mtlga5qj', id: '8yoa8k', name: 'card.png', type: 'image', width: 100, height: 50,
+      pkg: 'Mail', pkgId: 'mailpkg1', id: 'item001', name: 'card.png', type: 'image', width: 100, height: 50,
     }],
   };
   const r = lintWithMail(
-    wrap(['    <image id="b00001" name="card" src="ui://mtlga5qj8yoa8k" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>']),
+    wrap(['    <image id="b00001" name="card" src="ui://mailpkg1item001" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>']),
     idx,
   );
   const r05 = byRuleId(r, 'R-05');
@@ -518,13 +518,13 @@ test('★ concat ui://（真实工程写法）+ scale9grid → 能解析到资�
 
 test('★ slash ui:// + scale9grid → 同样能解析（两种风格并存）', () => {
   const idx = {
-    project: { packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
+    project: { packages: [{ name: 'Mail', id: 'mailpkg1' }] },
     resources: [{
-      pkg: 'Mail', pkgId: 'mtlga5qj', id: '8yoa8k', name: 'card.png', type: 'image', width: 100, height: 50,
+      pkg: 'Mail', pkgId: 'mailpkg1', id: 'item001', name: 'card.png', type: 'image', width: 100, height: 50,
     }],
   };
   const r = lintWithMail(
-    wrap(['    <image id="b00001" name="card" src="ui://mtlga5qj/8yoa8k" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>']),
+    wrap(['    <image id="b00001" name="card" src="ui://mailpkg1/item001" scale9grid="10,10,200,20" xy="0,0" size="100,50"/>']),
     idx,
   );
   assert.equal(byRuleId(r, 'R-05').length, 1);

@@ -131,7 +131,7 @@ const DEFAULT_FGUI_CONFIG = Object.freeze({
   //     · urlAttributes      = 「哪些属性指向一个**可测量尺寸的资源**」—— R-05（scale9grid
   //                            边界对账）与 R-10（九宫格适用性）靠它找"这个元素引用的图"；
   //     · uiRefAttributes    = 「哪些属性里的 ui:// 需要做**引用合法性校验**」—— 只有 R-04 用。
-  //   真实 FairyGUI 6.1.4 工程的字体引用是 `font="ui://mtlga5qj8yoa8k"`（拼接），
+  //   真实 FairyGUI 6.1.4 工程的字体引用是 `font="ui://mailpkg1item001"`（拼接），
   //   需要校验；但 `font` 若塞进 urlAttributes，会让 `<text font="ui://…">` 被 R-05/R-10
   //   当成"引用了一张图"去量宽高 → 误报。故单独一份清单。
   uiRefAttributes: Object.freeze(['src', 'url', 'icon', 'defaultItem', 'font']),

@@ -67,8 +67,8 @@ function notExecutablePlan() {
 function indexFixture() {
   return {
     version: '1.0',
-    project: { name: 'MailPopup', packages: [{ name: 'Mail', id: 'mtlga5qj' }] },
-    resources: [{ pkg: 'Mail', pkgId: 'mtlga5qj', type: 'image', id: 'q0bg', name: '背景.png', exported: 'true', width: 750, height: 1334 }],
+    project: { name: 'MailPopup', packages: [{ name: 'Mail', id: 'mailpkg1' }] },
+    resources: [{ pkg: 'Mail', pkgId: 'mailpkg1', type: 'image', id: 'q0bg', name: '背景.png', exported: 'true', width: 750, height: 1334 }],
     components: [],
   };
 }
@@ -176,7 +176,7 @@ test('④ B9：同一输入两遍，create_exec.json / .md 的 md5 一致', () =
   // md 不得含时间戳/绝对路径
   const md = fs.readFileSync(path.join(out1, 'create_exec.md'), 'utf8');
   assert.ok(!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(md), 'md 不得含时间戳');
-  // ⚠ 盘符匹配必须带前置边界：否则 `ui://mtlga5qj...` 里的 `i:/` 会被误判成盘符
+  // ⚠ 盘符匹配必须带前置边界：否则 `ui://mailpkg1...` 里的 `i:/` 会被误判成盘符
   assert.ok(!/(^|[\s`("'])[A-Za-z]:[\\/]/m.test(md),
     `★ md 不得含 Windows 绝对路径（跨机器不可复现）: ${(md.match(/(^|[\s`("'])[A-Za-z]:[\\/]/) || [])[0]}`);
 });
