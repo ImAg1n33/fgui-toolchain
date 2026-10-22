@@ -34,6 +34,7 @@ const COMMANDS = Object.freeze({
   'project-index': { module: './cmd-project-index', desc: 'M1：FGUI 工程只读索引（package.xml + 组件 XML -> project_index.json）' },
   'create-plan': { module: './cmd-create-plan', desc: 'v0.3-B：CREATE 模式（Design IR + 工程索引 -> create_plan.json/md；不依赖已有组件 XML）' },
   'create-exec': { module: './cmd-create-exec', desc: 'v0.3-D：把 create_plan 翻译成执行清单（create_exec.json/md；**不调用 Bridge**，调度由外部执行器负责）' },
+  'create-run': { module: './cmd-create-run', desc: 'v0.3-D：干跑 / 确认执行 create_exec（ping 自检 + 目标存在性门禁；不带 --confirm 只干跑，不写工程）' },
 });
 
 /**
