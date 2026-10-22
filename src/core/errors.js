@@ -14,6 +14,12 @@ const EXIT = Object.freeze({
   LINT_BLOCKED: 3,
   NEEDS_HUMAN: 4,
   ROLLED_BACK: 5,
+  // ★ FILE_NOT_FOUND 显式映射为 2（USAGE）★
+  //   文档里 2 的定义是「参数错误 / 漂移 / **目标文件找不到**」（cmd-gen-xml 头注释、
+  //   README 用法节皆如此写）。此前 EXIT 表缺这一键 → `AppError.exitCode` 的
+  //   `EXIT[this.code]` 查表落回 INTERNAL(1)，是**代码与既定契约不一致**。
+  //   （2026-10 由 team-lead 批准补齐；影响清单见该次提交说明。）
+  FILE_NOT_FOUND: 2,
 });
 
 /** 错误码常量表，避免各处拼错字符串 */

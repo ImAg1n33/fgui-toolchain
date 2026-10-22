@@ -222,11 +222,9 @@ async function run(ctx) {
   const indexPath = path.resolve(rootDir, indexFlag);
   for (const [p, what] of [[planPath, 'create_plan.json'], [indexPath, 'project_index.json']]) {
     if (!fs.existsSync(p)) {
-      // ★ 用 USAGE 而不是 FILE_NOT_FOUND ★
-      //   `AppError.exitCode` 走 `EXIT[code]` 查表，而 EXIT 里没有 FILE_NOT_FOUND 键
-      //   → 会退化成 1（INTERNAL）。对本命令而言「输入文件不存在」就是**用法错误**，
-      //   按约定应为 2，故显式用 USAGE（消息里带上绝对路径，便于定位）。
-      throw new AppError(CODES.USAGE, `${what} 不存在: ${p}`, { file: p });
+      // FILE_NOT_FOUND 已在 core/errors.js 显式映射为 2（USAGE 语义），
+      // 故此处直接用语义正确的错误码，无需绕行。
+      throw new AppError(CODES.FILE_NOT_FOUND, `${what} 不存在: ${p}`, { file: p });
     }
   }
 

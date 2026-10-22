@@ -165,10 +165,12 @@ test('reader: psdSha256 稳定（同文件两次读出同一指纹）', () => {
   assert.equal(a.sha256.length, 64);
 });
 
-test('reader: 文件不存在抛 FILE_NOT_FOUND', () => {
+test('reader: 文件不存在抛 FILE_NOT_FOUND（exitCode=2，契约：参数错误/目标文件找不到）', () => {
   assert.throws(() => readPsdFile(path.join(__dirname, 'nope.psd')), (err) => {
     assert.equal(err.code, 'FILE_NOT_FOUND');
-    assert.equal(err.exitCode, 1);
+    // 文档里 2 = 参数错误 / 漂移 / 目标文件找不到；此前因 EXIT 表缺键而落回 1，
+    // 现按既定契约对齐为 2（team-lead 批准）。
+    assert.equal(err.exitCode, 2);
     return true;
   });
 });
