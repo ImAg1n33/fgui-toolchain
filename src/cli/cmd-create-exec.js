@@ -231,15 +231,45 @@ async function run(ctx) {
   const plan = readJson(planPath);
   const projectIndex = readJson(indexPath);
 
-  // ★ pkgId：--pkg 优先，其次 plan.page.pkg；都查不到就**不传**（交给 buildExecPlan 记 unsupported）★
-  const pkgFlag = flagStr(flags.pkg);
-  const pkgName = (typeof pkgFlag === 'string' && pkgFlag.trim())
-    ? pkgFlag.trim()
-    : (plan && plan.page && plan.page.pkg ? String(plan.page.pkg) : null);
+  // ★ 目标包一致性门禁（第九轮审查 P0）★
+  //   只改「查哪个包 id」而不改 plan.page.pkg，会产出**跨包错引用**：
+  //   容器建在 plan 的包里、图片却引用 --pkg 那个包的 pkgId（实测过）。
+  //   → 不一致直接拒绝，**不产出任何清单**。
+  //   ★ 未来若真要迁移目标包，那是独立的「资源重映射流程」（需同时改写
+  //     page.pkg 与所有 src/url），本轮不做 —— 不做半吊子的部分迁移。
+  const planPkg = (plan && plan.page && plan.page.pkg) ? String(plan.page.pkg) : null;
+  const cliPkgRaw = flagStr(flags.pkg);
+  const cliPkg = (typeof cliPkgRaw === 'string' && cliPkgRaw.trim()) ? cliPkgRaw.trim() : null;
+  if (cliPkg && planPkg && cliPkg !== planPkg) {
+    throw new AppError(CODES.USAGE,
+      `plan 的目标包是 '${planPkg}'，--pkg 指定为 '${cliPkg}' —— 目标包不一致，`
+      + '请去掉 --pkg 或重新生成 CREATE Plan');
+  }
+
+  // ★ pkgId：--pkg 优先，其次 plan.page.pkg；都查不到就**不传** ★
+  //   （交给 buildExecPlan 记 unsupported / PKGID_INVALID，绝不编 id）
+  const pkgName = cliPkg || planPkg;
   const pkgId = findPkgId(projectIndex, pkgName);
 
+  // ★ 交叉核验数据必须传进去（第九轮审查 P0）★
+  //   buildExecPlan 能用索引里的「包清单」与「目标包资源登记表」做二次核对
+  //   （plan 是人工可编辑的，可能被改坏）。只传 pkgId 会让这两项核对在
+  //   正式入口被跳过 —— 这正是我们第三次踩到的同一类毛病（核心函数支持、
+  //   CLI 没接上）。
+  //   → 索引里有这些字段就**必须传**（即使为空：空也意味着「确实没登记」）；
+  //     索引里没有该字段才不传（由 exec-plan 写 advisory 说明跳过了核对）。
+  const opts = {};
+  if (pkgId) opts.pkgId = pkgId;
+  const idxPkgs = (projectIndex && projectIndex.project && Array.isArray(projectIndex.project.packages))
+    ? projectIndex.project.packages : null;
+  if (idxPkgs) opts.packages = idxPkgs;
+  if (Array.isArray(projectIndex && projectIndex.resources)) {
+    // 只传**目标包 + image**（buildExecPlan 用它比对图片短 ID 是否已登记）
+    opts.resources = projectIndex.resources.filter((r) => r && r.pkg === planPkg && r.type === 'image');
+  }
+
   // buildExecPlan 返回 { execPlan }
-  const built = buildExecPlan(plan, pkgId ? { pkgId } : {});
+  const built = buildExecPlan(plan, opts);
   const exec = built && built.execPlan ? built.execPlan : built;
 
   const outDir = path.resolve(rootDir, flagStr(flags.out, config.paths.outDir || 'out'));

@@ -182,6 +182,80 @@ test('④ B9：同一输入两遍，create_exec.json / .md 的 md5 一致', () =
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// 第九轮审查：CLI 必须把工程数据接进 buildExecPlan + --pkg 一致性门禁
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0① 篡改图片 src（指向未登记资源）+ --strict → 退 4（改前是 0）', () => {
+  const plan = cleanPlan();
+  plan.nodes[0].attrs.src = 'zzz999'; // 索引里没有这个短 ID
+  const f = setup('wire-tampered', plan);
+
+  // 默认仍 0（清单生成了），但必须标不可执行
+  const r = runExec(f);
+  assert.equal(r.code, 0);
+  assert.equal(r.json.executable, false, '★ 未登记的 src 必须被交叉核对拦下');
+  assert.ok(r.json.preflight.failures.some((x) => x.code === 'RESOURCE_NOT_REGISTERED'
+    || /不在目标包登记表/.test(String(x.detail))),
+  `preflight 应给出资源未登记：${JSON.stringify(r.json.preflight.failures)}`);
+
+  const strict = runExec(f, ['--strict']);
+  assert.equal(strict.code, 4, `★ --strict 必须退 4（改前为 0 —— 那就是假就绪）`);
+});
+
+test('★ P0② --pkg 与 plan 目标包不一致 → 退 2，且**不产出**任何清单', () => {
+  const f = setup('wire-pkg-bad');
+  const r = runCli(['create-exec', '--plan', f.planPath, '--index', f.idxPath, '--out', f.out, '--pkg', 'Other']);
+  assert.equal(r.code, 2, `★ 目标包不一致应退 2，实际 ${r.code}`);
+  const out = r.stderr + r.stdout;
+  assert.ok(/目标包不一致/.test(out), '错误信息必须写明「目标包不一致」');
+  assert.ok(/Mail/.test(out) && /Other/.test(out), '错误信息必须给出两个包名');
+  // ★ 不产出：既没有 json 也没有 md
+  assert.equal(fs.existsSync(path.join(f.out, 'create_exec.json')), false, '★ 不得产出 create_exec.json');
+  assert.equal(fs.existsSync(path.join(f.out, 'create_exec.md')), false, '★ 不得产出 create_exec.md');
+});
+
+test('★ P0③ --pkg 与 plan 目标包一致 → exit 0 正常产出（回归）', () => {
+  const f = setup('wire-pkg-ok');
+  const r = runExec(f, ['--pkg', 'Mail']);
+  assert.equal(r.code, 0, `一致时不应阻断：${r.stderr.slice(0, 300)}`);
+  assert.equal(r.json.executable, true);
+  assert.ok(fs.existsSync(path.join(f.out, 'create_exec.json')));
+  assert.ok(fs.existsSync(path.join(f.out, 'create_exec.md')));
+});
+
+test('★ P0④ 干净 plan + --strict → exit 0（回归，别改坏）', () => {
+  const f = setup('wire-clean-strict');
+  const r = runExec(f, ['--strict']);
+  assert.equal(r.code, 0);
+  assert.equal(r.json.executable, true);
+});
+
+test('★ P0⑤ 索引正常 → advisories 不出现「已跳过交叉核对」（证明数据真的传进去了）', () => {
+  const f = setup('wire-advisories');
+  assert.equal(runExec(f).code, 0);
+  const exec = JSON.parse(fs.readFileSync(path.join(f.out, 'create_exec.json'), 'utf8'));
+  const advisories = Array.isArray(exec.advisories) ? exec.advisories : null;
+  assert.ok(advisories, 'execPlan 应带 advisories 数组');
+  assert.ok(!advisories.some((a) => /已跳过/.test(String(a))),
+    `★ 索引里有数据就必须做交叉核对，不该跳过：${JSON.stringify(advisories)}`);
+  assert.ok(!advisories.some((a) => /未提供 options\.packages/.test(String(a))));
+  assert.ok(!advisories.some((a) => /未提供 options\.resources/.test(String(a))));
+});
+
+test('★ P0 补充：索引缺 resources 字段 → advisories 明确写出「已跳过」（不静默）', () => {
+  const f = setup('wire-no-res');
+  const idx = JSON.parse(fs.readFileSync(f.idxPath, 'utf8'));
+  delete idx.resources; // 老索引可能没有该字段
+  fs.writeFileSync(f.idxPath, `${JSON.stringify(idx, null, 2)}\n`, 'utf8');
+
+  assert.equal(runExec(f).code, 0);
+  const exec = JSON.parse(fs.readFileSync(path.join(f.out, 'create_exec.json'), 'utf8'));
+  const advisories = Array.isArray(exec.advisories) ? exec.advisories : [];
+  assert.ok(advisories.some((a) => /未提供 options\.resources/.test(String(a))),
+    `★ 没数据必须显式说明跳过，不能静默：${JSON.stringify(advisories)}`);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // ⑤ md 内容：unsupported 原因 / 5 个必需区块
 // ════════════════════════════════════════════════════════════════════════════
 
