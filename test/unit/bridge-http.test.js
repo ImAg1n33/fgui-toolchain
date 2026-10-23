@@ -24,7 +24,8 @@ const assert = require('node:assert/strict');
 const http = require('http');
 
 const {
-  createHttpTransport, defaultPost, DEFAULT_TIMEOUT_MS, DEFAULT_PORT,
+  createHttpTransport, defaultPost, assertLoopbackUrl, LOOPBACK_HOSTS,
+  DEFAULT_TIMEOUT_MS, DEFAULT_PORT,
 } = require('../../src/create/bridge-http');
 
 /** 记录调用参数的假 post：绝不联网，只按剧本返回。 */
@@ -193,6 +194,83 @@ test('⑥-b post 返回非对象（null/字符串）→ {ok:false}', async () =>
     assert.equal(r.ok, false, `post 返回 ${JSON.stringify(bad)} 不得判成功`);
     assert.equal(r.transportError, true);
   }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ P0-2：只连本机回环（拒绝必须发生在**联网之前**）★
+//   Bridge 请求体带组件名/文本/工程路径；--bridge-url 指向外部服务器
+//   就是把工程细节送出本机（PRD K1 事故）。故 createHttpTransport 在
+//   **构造时**强校验，post 注入点根本到不了 —— 「post 零调用」就是证据。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0-2 ① https://example.com/ → 构造即抛，post 零调用', () => {
+  const post = fakePost(() => ({ status: 200, text: '{"ok":true}' }));
+  assert.throws(() => createHttpTransport({ bridgeUrl: 'https://example.com/', post }),
+    (err) => {
+      assert.match(err.message, /协议必须是 http:/);
+      return true;
+    });
+  assert.equal(post.calls.length, 0, '★ 拒绝必须发生在构造期 —— 一次 post 都不许有');
+});
+
+test('★ P0-2 ② http://example.com/ / http://10.0.0.5/ → 拒绝，post 零调用', () => {
+  for (const bad of ['http://example.com/', 'http://10.0.0.5/', 'http://192.168.1.10:7531/']) {
+    const post = fakePost(() => ({ status: 200, text: '{"ok":true}' }));
+    assert.throws(() => createHttpTransport({ bridgeUrl: bad, post }),
+      (err) => {
+        assert.match(err.message, /只允许本机回环/);
+        assert.match(err.message, /PRD K1/);
+        return true;
+      }, `应拒绝 ${bad}`);
+    assert.equal(post.calls.length, 0, `★ ${bad} 一次 post 都不许有`);
+  }
+});
+
+test('★ P0-2 ②-b http://127.0.0.2:7531/ 也拒绝（白名单只认 127.0.0.1，不做子网猜测）', () => {
+  const post = fakePost(() => ({ status: 200, text: '{"ok":true}' }));
+  assert.throws(() => createHttpTransport({ bridgeUrl: 'http://127.0.0.2:7531/', post }), /只允许本机回环/);
+  assert.equal(post.calls.length, 0);
+});
+
+test('★ P0-2 ③ 合法回环三种形态 → 放行且能正常收发', async () => {
+  for (const good of ['http://127.0.0.1:7531/', 'http://localhost:7531/', 'http://[::1]:7531/']) {
+    const post = fakePost(() => ({ status: 200, text: '{"ok":true,"data":{"port":7531}}' }));
+    const t = createHttpTransport({ bridgeUrl: good, post });
+    assert.equal(t.bridgeUrl, good);
+    const r = await t.send('ping');
+    assert.deepEqual(r, { ok: true, data: { port: 7531 } }, `${good} 应能正常收发`);
+    assert.equal(post.calls.length, 1, '合法 URL 必须真的发一次请求');
+  }
+});
+
+test('★ P0-2 ④ env FGUI_BRIDGE_URL 非回环 → 构造即抛（env 不是绕过口）', () => {
+  const prev = process.env.FGUI_BRIDGE_URL;
+  try {
+    process.env.FGUI_BRIDGE_URL = 'http://bridge.evil.example/';
+    const post = fakePost(() => ({ status: 200, text: '{"ok":true}' }));
+    assert.throws(() => createHttpTransport({ post }), /只允许本机回环/);
+    assert.equal(post.calls.length, 0);
+  } finally {
+    if (prev === undefined) delete process.env.FGUI_BRIDGE_URL;
+    else process.env.FGUI_BRIDGE_URL = prev;
+  }
+});
+
+test('★ P0-2 ⑤ defaultPost 直调非回环 → resolve {status:0}，不 reject、不进网', async () => {
+  const r = await defaultPost('http://10.0.0.5:7531/', '{}', 5000);
+  assert.equal(r.status, 0);
+  assert.match(r.error, /只允许本机回环/);
+});
+
+test('★ P0-2 ⑥ assertLoopbackUrl 行为表（协议/主机/非法 URL）', () => {
+  assert.throws(() => assertLoopbackUrl('https://localhost/'), /协议必须是 http:/);
+  assert.throws(() => assertLoopbackUrl('ftp://127.0.0.1/'), /协议必须是 http:/);
+  assert.throws(() => assertLoopbackUrl('not-a-url'), /不是合法 URL/);
+  assert.throws(() => assertLoopbackUrl('http://localhost./'), /只允许本机回环/,
+    '★ localhost.（带尾点）不在白名单 —— 不猜 DNS 语义');
+  assert.equal(assertLoopbackUrl('http://LOCALHOST:7531/').hostname, 'localhost',
+    'URL 会把主机名归一成小写');
+  assert.deepEqual([...LOOPBACK_HOSTS].sort(), ['127.0.0.1', '::1', '[::1]', 'localhost']);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

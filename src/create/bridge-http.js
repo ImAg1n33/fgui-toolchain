@@ -29,17 +29,72 @@
  *   → 本适配器**只支持显式 URL**（`--bridge-url` 或 env `FGUI_BRIDGE_URL`），
  *     **不做多实例路由复刻**，也**不加内建重试**（失败即停，与朋友 SKILL.md
  *     「同一组件上的编辑命令串行、上一条成功再发下一条」一致）。
+ *
+ * ★ P0-2：只连本机回环 ★
+ *   请求体带组件名/文本内容/工程路径 —— `--bridge-url` 指向外部服务器就等于
+ *   把工程细节送出本机（PRD K1 合规事故）。故 `assertLoopbackUrl()` 在
+ *   **发请求之前**强校验：协议必须 `http:`，主机只认 127.0.0.1 / localhost /
+ *   [::1]（显式白名单，不做子网猜测），不合法直接抛错、绝不静默降级。
  * ════════════════════════════════════════════════════════════════════════════
  */
 
 const http = require('http');
 const https = require('https');
+const { AppError, CODES } = require('../core/errors');
 
 /** 默认超时（依据朋友脚本 `request(URL, name, args, 30000)`）。 */
 const DEFAULT_TIMEOUT_MS = 30000;
 
 /** 默认端口（依据 `plugin_main.js.baseline:51`）。 */
 const DEFAULT_PORT = 7531;
+
+/**
+ * ★ P0-2：Bridge 只允许**本机回环**地址 ★
+ *
+ * agent-bridge 是插在本机 FairyGUI 编辑器里的服务（HttpListener 只听
+ * `http://127.0.0.1:<port>/`，见 docs/BRIDGE-TRANSPORT.md §1）。请求体里
+ * 带组件名、文本内容、工程路径 —— 一旦 `--bridge-url` 指向外部服务器，
+ * 就是把工程细节送出本机（PRD K1 合规事故）。
+ *
+ * 故在**发请求之前**做强校验：显式白名单，不做子网猜测。
+ * `http://127.0.0.2:` 这类"也是回环"的地址同样拒绝 —— 白名单的含义就是
+ * 「只认列明的形态」，默认 URL 本来就是 127.0.0.1，没有放行更多地址的需要。
+ *
+ * @type {Set<string>}
+ */
+const LOOPBACK_HOSTS = Object.freeze(new Set([
+  '127.0.0.1',
+  'localhost', // URL 会把大小写归一成小写
+  '::1', // 规范形态（URL.hostname 对 IPv6 带括号，见下）
+  '[::1]',
+]));
+
+/**
+ * 校验 bridgeUrl 是「本机回环 + http」，不合法则**抛错**（绝不静默降级）。
+ *
+ * @param {string} url 已解析出优先序的最终 URL
+ * @returns {URL} 解析后的 URL 对象（调用方可复用）
+ * @throws {AppError} 协议非 http / 主机非回环 / 不是合法 URL
+ */
+function assertLoopbackUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch (e) {
+    throw new AppError(CODES.USAGE, `bridgeUrl 不是合法 URL: ${String(url)}`);
+  }
+  if (u.protocol !== 'http:') {
+    throw new AppError(CODES.USAGE,
+      `bridgeUrl 协议必须是 http:（Bridge 是 HTTP 服务，不支持 ${u.protocol}）：${url}`);
+  }
+  if (!LOOPBACK_HOSTS.has(u.hostname)) {
+    throw new AppError(CODES.USAGE,
+      `Bridge 只允许本机回环地址（127.0.0.1 / localhost / [::1]），拒绝连接到 `
+      + `${u.hostname}：${url} —— Bridge 是本机编辑器里的服务；把组件名/文本内容/工程路径`
+      + '发去非本机地址属于 PRD K1 合规事故');
+  }
+  return u;
+}
 
 /**
  * 默认 POST 实现（Node 原生 http/https，零依赖）。
@@ -71,9 +126,11 @@ function defaultPost(url, body, timeoutMs) {
   return new Promise((resolve) => {
     let u;
     try {
-      u = new URL(url);
+      // ★ P0-2 第二道闸：直调 defaultPost 也先过回环校验（本函数永不 reject，
+      //   故校验失败以 {status:0,error} 表达，同样不进网）★
+      u = assertLoopbackUrl(url);
     } catch (e) {
-      resolve({ status: 0, text: '', error: `bridgeUrl 不是合法 URL: ${String(url)}` });
+      resolve({ status: 0, text: '', error: String((e && e.message) || e) });
       return;
     }
     const mod = (u.protocol === 'https:') ? https : http;
@@ -139,6 +196,9 @@ function createHttpTransport(a = {}) {
   const bridgeUrl = (typeof a.bridgeUrl === 'string' && a.bridgeUrl.trim())
     ? a.bridgeUrl.trim()
     : (process.env.FGUI_BRIDGE_URL || `http://127.0.0.1:${DEFAULT_PORT}/`);
+  // ★ P0-2 第一道闸：**构造时**校验回环 —— 拒绝发生在任何请求之前，
+  //   连 post 注入点都到不了（测试据此断言「post 零调用」）★
+  assertLoopbackUrl(bridgeUrl);
   const post = typeof a.post === 'function' ? a.post : defaultPost;
 
   /**
@@ -207,6 +267,8 @@ function createHttpTransport(a = {}) {
 module.exports = {
   createHttpTransport,
   defaultPost,
+  assertLoopbackUrl,
+  LOOPBACK_HOSTS,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_PORT,
 };
