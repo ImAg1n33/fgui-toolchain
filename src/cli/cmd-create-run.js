@@ -5,6 +5,7 @@
  * usage:
  *   fgui-rb create-run --exec <create_exec.json> --bridge-url <url>
  *                      [--project <path>] [--confirm] [--out <dir>] [--timeout-ms 30000]
+ *   （--project 在 --confirm 时必填：写操作必须绑定目标工程，见文首 P1）
  *
  * ★ 两条硬约束 ★
  *   1. **不带 `--confirm` 只做干跑**：只调 `ping` 做运行时自检，**不发任何写命令**，
@@ -19,10 +20,18 @@
  *       其余写步骤 pkg/name 必须绑定 target；verify 只许只读回读命令。不符 → 退 4
  *       且**零调用**（连探测都不发）。
  *   3.2 **存在性探测**（只读 read_component）：已存在 → 退 4；探测失败（没打通）→ 退 4。
- *   3.3 **严格不存在判据**（P0-3，`isAbsentEvidence`）：插件回 ok:false 也**不等于**
- *       「组件不存在」—— 可能是包不存在/读失败/内部异常。只有错误明确匹配
- *       「not found / does not exist / 不存在」等模式且不含包/读取/异常字样，
- *       才作为不存在证据；否则按未知处理，退 4。
+ *   3.3 **严格不存在判据**（P0-3，`isAbsentEvidence(error, target)`）：插件回
+ *       ok:false 也**不等于**「组件不存在」—— 可能是包不存在/读失败/内部异常。
+ *       **结构化判定**（第十二轮修订，勿改回关键字黑名单）：真实格式
+ *       `component not found in package '<pkg>': <name>` 必须包名+组件名都
+ *       精确等于 target 才算不存在；无包名简写 `component not found` 算不存在；
+ *       包级错误/读取失败/内部异常/名字对不上 → 一律未知，退 4 且错误带插件原文。
+ *
+ * ★ 写操作绑定实例（P1，第十二轮）★
+ *   `--confirm` 必须显式带 `--project`：只验证"打开了某个工程"不够，多实例时
+ *   可能连错编辑器、把组件写进别的工程（缺 → 退 2）。干跑是只读自检，可不带。
+ *   `--project` 与 `ping.projectPath` 的比较走归一化（`\`→`/`、去尾斜杠、
+ *   Windows 大小写不敏感；报错信息保留双方原值）。
  *
  * ★ 不做的事 ★
  *   · **不实现 `publish` / 删除类入口**（Runner 自带白名单 `CREATE_ALLOWED_OPS` 已挡，
@@ -41,7 +50,7 @@
  * 退出码：
  *   0  干跑成功 / 执行成功（report.status 为 `ok` 或 `ok-unverified`，stdout 用
  *      `status`/`verified` 区分「已验证的成功」与「未验证的成功」）
- *   2  参数错误 / 文件不存在
+ *   2  参数错误 / 文件不存在 / `--confirm` 缺 `--project`
  *   4  NEEDS_HUMAN：运行时自检不过、目标绑定不符、目标组件已存在、
  *      探测失败或无法确认为「组件不存在」
  *   5  Runner 报告 status 为 failed / verify-failed / refused
@@ -206,28 +215,52 @@ function checkTargetBinding(execPlan) {
 }
 
 /**
- * ★ P0-3「组件不存在」的严格判据 ★
+ * ★ P0-3「组件不存在」的严格判据（第十二轮：改为**结构化判定**）★
  *
- * 原实现把探测的任何 `ok:false`（非传输错误）都当作「组件不存在」—— 但
- * `read_component` 也可能因**包不存在 / 读文件失败 / 插件内部异常**返回 ok:false。
- * 把业务错误读成"不存在"，下一步就是往已存在组件上写（无回滚）。
+ * 背景：Bridge 基线的真实报错是
+ *   `component not found in package 'Mail': NewPage`
+ * （见 docs/plugin_main.js.baseline）—— **同时含 `not found` 和 `package`**。
+ * 上一轮用「关键字黑名单」（含 package/包 就否）把这个合法报错也否了 →
+ * 正常新建在存在性检查阶段被误拦（exit 4）。关键字路线根本走不通：
+ * 删掉 /package/i 会放过 `package not found`，留着又会误杀真实格式。
  *
- * 只有错误信息**明确**表示"没有这个组件"时才算不存在证据；其余一律按
- * 「存在性未知」处理（fail-closed，退 4）。插件真实措辞未经源码确认
- * （instances.mjs 缺失），故判据从保守方向设计：命中下列不存在模式、
- * 且不含包/读取/异常类字样，才放行。
+ * 故改为**解析真实格式 + 精确匹配目标**：
+ *   模式 A（Bridge 完整格式）`component not found in package '<pkg>': <name>`
+ *     → 捕获 pkg/name，**必须同时等于 target.pkg/target.page** 才算
+ *       「目标组件不存在」；包名或组件名对不上 → 判**未知**
+ *       （那是别的包/别的组件的错误，证明不了我们的目标不存在）。
+ *   模式 B（无包名简写）`component not found`
+ *     → 组件级错误、无名字可核 → 算不存在。
+ *   其余一律未知：包级错误（package not found / package 'X' not found）、
+ *   读取失败、插件内部异常……fail-closed，退 4。
+ *
+ * 插件真实措辞未经源码完全确认 → 判据从保守方向设计：宁可多拦（人来看），
+ * 不可把业务错误读成"不存在"（下一步就是往已存在组件上写，无回滚）。
  *
  * @param {*} error 插件返回的 error 字段
- * @returns {boolean} true = 明确是「组件不存在」
+ * @param {{pkg:string, page:string}|null|null} [target] 目标组件（用于核对模式 A 的名字）
+ * @returns {boolean} true = 明确是「**目标**组件不存在」
  */
-function isAbsentEvidence(error) {
-  const msg = String(error || '');
+function isAbsentEvidence(error, target) {
+  const msg = String(error || '').trim();
   if (!msg) return false;
-  const ABSENT_RE = [/not\s*found/i, /does\s*not\s*exist/i, /doesn'?t\s+exist/i, /no\s+such/i, /不存在/];
-  // 含这些字样 → 明确**不是**「组件不存在」（如 package not found / 读取失败 / 内部异常）
-  const NOT_ABSENT_RE = [/package/i, /包/, /pkg/i, /资源库/, /读取|read\s*fail|failed\s+to\s+read/i, /internal|异常|occurred/i];
-  if (NOT_ABSENT_RE.some((re) => re.test(msg))) return false;
-  return ABSENT_RE.some((re) => re.test(msg));
+  const t = target || {};
+
+  // 模式 A：Bridge 完整格式。不加 ^ 锚 —— 允许 `read_component: ` 之类前缀。
+  const PATTERN_A = /component\s+not\s+found\s+in\s+package\s+['"]?([^'":]+?)['"]?\s*:\s*(.+)$/i;
+  const ma = PATTERN_A.exec(msg);
+  if (ma) {
+    const pkg = ma[1].trim().replace(/^['"]+|['"]+$/g, '');
+    const name = ma[2].trim().replace(/^['"]+|['"]+$/g, '');
+    // 名字对不上 → 未知（不是我们目标的错误，不能拿来当证据）
+    return pkg === t.pkg && name === t.page;
+  }
+
+  // 模式 B：无包名的简写（组件级错误，无名字可核）
+  if (/component\s+not\s+found/i.test(msg)) return true;
+
+  // 其余：包级错误 / 读取失败 / 内部异常…… 一律未知
+  return false;
 }
 
 /**
@@ -278,6 +311,13 @@ async function runCreateRun(args = {}, deps = {}) {
     throw new AppError(CODES.USAGE,
       'create-run 需要 --bridge-url <url>（如 http://127.0.0.1:7531/；'
       + '多实例路由语义未确认，故不支持按工程自动选择实例）');
+  }
+  // ★ P1：确认执行（写操作）必须显式 --project ★
+  //   只验证"编辑器打开了某个工程"不够 —— 多实例时可能连错编辑器，
+  //   把组件写进别的工程。干跑是只读自检，仍可不带。
+  if (confirm && !project) {
+    throw new AppError(CODES.USAGE,
+      '确认执行必须显式指定 --project（避免连到错误的编辑器实例）；干跑可不带');
   }
 
   const execPath = path.resolve(rootDir, exec);
@@ -395,9 +435,9 @@ async function runCreateRun(args = {}, deps = {}) {
     });
     return EXIT.NEEDS_HUMAN;
   }
-  //   P0-3：插件回了 ok:false，但错误**无法确认**是「组件不存在」
-  //   （可能是包不存在 / 读失败 / 插件内部异常）→ 按未知处理，绝不当作不存在
-  if (!isAbsentEvidence(probe.error)) {
+  //   P0-3：插件回了 ok:false，但错误**无法确认**是「目标组件不存在」
+  //   （可能是包不存在 / 读失败 / 插件内部异常 / 别的包或组件的错误）→ 按未知处理
+  if (!isAbsentEvidence(probe.error, { pkg: target.pkg, page: target.page })) {
     if (logger) logger.error('探测返回 ok:false 但无法确认为「组件不存在」，按未知拒绝执行', {
       error: probe.error,
     });
@@ -407,8 +447,9 @@ async function runCreateRun(args = {}, deps = {}) {
       dryRun: false,
       exitCodeMeaning: 'NEEDS_HUMAN',
       reason: 'TARGET_EXISTENCE_UNVERIFIED',
-      detail: `探测返回 ok:false 但无法确认为「组件不存在」（error: ${probe.error}）`
-        + ' —— 可能是包不存在/读取失败/插件内部异常。按未知处理，拒绝执行（无事务回滚）。',
+      detail: `探测返回 ok:false 但无法确认为「组件不存在」（插件原始报错：${probe.error}）`
+        + ' —— 可能是包不存在/读取失败/插件内部异常，或是**别的包/别的组件**的错误。'
+        + '按未知处理，拒绝执行（无事务回滚）。',
       nextAction: '人工确认该组件确实不存在后再执行；若判据需要扩充，'
         + '改 cmd-create-run.js 的 isAbsentEvidence 并同步其单测。',
     });

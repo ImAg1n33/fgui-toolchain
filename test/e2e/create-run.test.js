@@ -179,7 +179,13 @@ const PING_OK = {
     projectPath: 'D:/proj/Mail.fairy', projectOpen: true, project: 'Mail',
   },
 };
-const READ_ABSENT = { ok: false, error: '组件不存在：Mail/MailPagePopup' };
+/**
+ * 「目标不存在」的标准剧本 —— 用 **Bridge 基线的真实报错格式**
+ * （docs/plugin_main.js.baseline：`component not found in package 'Mail': NewPage`）。
+ * ★ 第十二轮 P0 的教训：这个字符串同时含 `not found` 和 `package`，
+ *   靠关键字黑名单判「不存在」会把正常新建误拦。必须结构化判定。★
+ */
+const READ_ABSENT = { ok: false, error: "component not found in package 'Mail': MailPagePopup" };
 const READ_PRESENT = { ok: true, data: { pkg: 'Mail', name: 'MailPagePopup', xml: okXml() } };
 const WRITE_OK = { ok: true, data: { ok: true } };
 
@@ -263,7 +269,9 @@ function stdArgs(f, extra = {}) {
   return {
     exec: f.execPath,
     bridgeUrl: 'http://127.0.0.1:7531/',
-    project: null,
+    // ★ P1：确认执行必须显式 --project（写操作要绑定编辑器实例）；
+    //   默认值与 PING_OK.data.projectPath 一致，测试可用 extra 覆盖 ★
+    project: 'D:/proj/Mail.fairy',
     confirm: false,
     out: f.out,
     timeoutMs: 30000,
@@ -360,7 +368,7 @@ test('③-b ping 不可达（transportError）→ 退 4，原因说明要开编�
   assert.match(r.json.preflight.reason, /ECONNREFUSED/);
 });
 
-test('③-c --project 与 ping.projectPath 不一致 → 退 4（fail-closed）', async () => {
+test('③-c --project 与 ping.projectPath 不一致 → 退 4（fail-closed），错误给出两个原值', async () => {
   const f = setup('wrong-project');
   const r = await runInProcess({
     args: stdArgs(f, { project: 'D:/other/Proj' }),
@@ -368,7 +376,42 @@ test('③-c --project 与 ping.projectPath 不一致 → 退 4（fail-closed）'
   });
   assert.equal(r.code, 4);
   assert.match(r.json.preflight.reason, /另一个工程/);
-  assert.match(r.json.preflight.reason, /Mail\.fairy/);
+  // ★ 原值保留用于报错（归一化只用于比较）★
+  assert.ok(r.json.preflight.reason.includes('D:/other/Proj'), '错误要给出 --project 原值');
+  assert.ok(r.json.preflight.reason.includes('D:/proj/Mail.fairy'), '错误要给出 ping.projectPath 原值');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ 第十二轮 P1：--confirm 必须显式 --project（写操作要绑定编辑器实例）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P1 ③ --confirm 缺 --project → 退 2，且 ping 都不发（用法错误先于联网）', async () => {
+  const f = setup('confirm-needs-project');
+  const r = await runInProcess({
+    args: stdArgs(f, { confirm: true, project: null }), script: happyScript(),
+  });
+  assert.equal(r.code, 2, `确认执行缺 --project 应退 2，实际 ${r.code}`);
+  assert.equal(r.err && r.err.code, 'USAGE');
+  assert.match(r.err.message, /确认执行必须显式指定 --project/);
+  assert.match(r.err.message, /避免连到错误的编辑器实例/);
+  assert.deepEqual(opsOf(r.calls), [], '★ 用法错误发生在联网之前 —— ping 都不发');
+});
+
+test('★ P1 ④ 干跑可不带 --project（回归：干跑是只读自检，不绑实例）', async () => {
+  const f = setup('dry-no-project');
+  const r = await runInProcess({ args: stdArgs(f, { project: null }), script: happyScript() });
+  assert.equal(r.code, 0);
+  assert.equal(r.json.dryRun, true);
+  assert.deepEqual(opsOf(r.calls), ['ping']);
+});
+
+test('★ P1 ⑤ --project 归一化：反斜杠 + 大小写 + 尾斜杠 → 判同一工程，不误拦', async () => {
+  const f = setup('project-normalize');
+  // ping.projectPath='D:/proj/Mail.fairy'；下列写法归一代后都应相等
+  for (const p of ['d:/proj/mail.fairy', 'D:\\Proj\\Mail.fairy', 'D:/proj/Mail.fairy/']) {
+    const r = await runInProcess({ args: stdArgs(f, { project: p }), script: happyScript() });
+    assert.equal(r.code, 0, `归一化后应判同一工程（${p}）：${JSON.stringify(r.json).slice(0, 300)}`);
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -586,10 +629,10 @@ test('★ P0-1 ⑥ 清单里出现 set_image_scale9 → 被 Runner 白名单拦�
 //   包不存在 / 读失败 / 插件内部异常 → 存在性未知 → 退 4（fail-closed）。
 // ════════════════════════════════════════════════════════════════════════════
 
-test('★ P0-3 ① probe 返回 "component not found" → 判不存在，照常执行退 0', async () => {
+test('★ P0-3 ① probe 返回简写 "component not found" → 判不存在，照常执行退 0', async () => {
   const f = setup('absent-en');
   const script = happyScript();
-  script.read_component = [{ ok: false, error: 'component not found: Mail/MailPagePopup' }, READ_PRESENT];
+  script.read_component = [{ ok: false, error: 'component not found' }, READ_PRESENT];
   const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script });
 
   assert.equal(r.code, 0, `明确不存在应放行：${JSON.stringify(r.json).slice(0, 300)}`);
@@ -622,21 +665,50 @@ test('★ P0-3 ③ probe 返回 "读取失败" → 存在性未知，退 4', asy
   assert.deepEqual(opsOf(r.calls), ['ping', 'read_component']);
 });
 
-test('★ P0-3 ④ isAbsentEvidence 判据表（纯函数直测，防模式表被改松）', () => {
-  // 明确「组件不存在」→ true
-  for (const e of [
-    'component not found', 'Component "X" does not exist', "component doesn't exist",
-    'no such component', '组件不存在', 'not found', '组件不存在：Mail/MailPagePopup',
-  ]) {
-    assert.equal(isAbsentEvidence(e), true, `应判不存在: ${e}`);
-  }
-  // 不是「组件不存在」→ false（含包/读取/异常字样，或压根不匹配）
-  for (const e of [
-    'package not found', 'the package does not exist', '包 Mail 不存在', '读取失败',
-    '组件文件损坏', '插件内部异常', 'internal error occurred', 'timeout', '', null, undefined,
-  ]) {
-    assert.equal(isAbsentEvidence(e), false, `不得判不存在: ${JSON.stringify(e)}`);
-  }
+test('★ P0-3 ④ isAbsentEvidence 判据表（真实 Bridge 格式；①②改前必须红）', () => {
+  const T = { pkg: 'Mail', page: 'NewPage' };
+  // ① 模式 A：Bridge 完整格式，包名+组件名都指向 target → 不存在（可继续）
+  //   ★ 改前被 /package/i 黑名单误拦（exit 4）—— 这就是本轮 P0 ★
+  assert.equal(isAbsentEvidence("component not found in package 'Mail': NewPage", T), true,
+    '★ 真实格式+包名/组件名全中 → 必须判不存在（改前为 false，正常新建被误拦）');
+  // ② 带命令前缀的真实格式 → 不存在
+  assert.equal(isAbsentEvidence("read_component: component not found in package 'Mail': NewPage", T), true,
+    '★ 带前缀的真实格式也必须判不存在（改前为 false）');
+  // ③ 包名对不上（那是别的包的错误，证明不了我们的目标不存在）→ 未知
+  assert.equal(isAbsentEvidence("component not found in package 'Other': NewPage", T), false);
+  // ④ 组件名对不上 → 未知
+  assert.equal(isAbsentEvidence("component not found in package 'Mail': OtherPage", T), false);
+  // ⑤ 包级错误（无 component 字样）→ 未知
+  assert.equal(isAbsentEvidence('package not found: Mail', T), false);
+  assert.equal(isAbsentEvidence("package 'Mail' not found", T), false);
+  // ⑥ 读取失败 / 内部异常 → 未知
+  assert.equal(isAbsentEvidence('读取失败', T), false);
+  assert.equal(isAbsentEvidence('internal error occurred', T), false);
+  // ⑦ 模式 B：无包名的简写（组件级错误，无名字可核）→ 不存在
+  assert.equal(isAbsentEvidence('component not found', T), true);
+  // 边界：空 error / 无 target → 未知（fail-closed）
+  assert.equal(isAbsentEvidence('', T), false);
+  assert.equal(isAbsentEvidence(null, T), false);
+  assert.equal(isAbsentEvidence("component not found in package 'Mail': NewPage", null), false,
+    '★ 拿不到 target 时无法核对名字 → 宁可判未知');
+});
+
+test('★ P0-3 ⑤ 真实格式 + 命令前缀 → 照常执行退 0（改前被误拦，必须能红）', async () => {
+  const f = setup('absent-real');
+  const script = happyScript();
+  script.read_component = [
+    { ok: false, error: "read_component: component not found in package 'Mail': MailPagePopup" },
+    READ_PRESENT,
+  ];
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script });
+
+  assert.equal(r.code, 0, `真实格式必须放行（改前退 4）：${JSON.stringify(r.json).slice(0, 400)}`);
+  assert.equal(r.json.status, 'ok');
+  assert.match(r.json.targetExistence.note, /明确匹配「组件不存在」判据/);
+  // 完整序列照常：探测之后步骤+回读都发生
+  const plan = realExec();
+  assert.deepEqual(opsOf(r.calls),
+    ['ping', 'read_component', ...plan.steps.map((s) => s.op), ...plan.verify.map((v) => v.op)]);
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -780,9 +852,12 @@ test('⑧ 全栈 loopback：HTTP 500+ok 也判成功；干跑只 ping；确认�
   });
 
   // ── 确认执行：ping(500+ok) → 探测不存在 → 步骤序列 → 回读，退 0，报告落盘 ──
+  //   --project 故意用反斜杠+小写（d:\proj\mail.fairy vs ping 的 D:/proj/Mail.fairy）：
+  //   既满足 P1「确认执行必须显式 --project」，又证明**真 CLI 做归一化比较**。
   await withBridge(makeHandler(), async (bridge) => {
     const r = await runCliJsonAsync([
       'create-run', '--exec', f.execPath, '--bridge-url', bridge.url, '--out', f.out, '--confirm',
+      '--project', 'd:\\proj\\mail.fairy',
     ]);
     assert.equal(r.code, 0, `确认执行应退 0：${r.stderr.slice(0, 300)}`);
     assert.equal(r.json.status, 'ok');
