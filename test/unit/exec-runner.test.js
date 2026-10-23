@@ -468,3 +468,66 @@ test('★ P0-B ⑥ 所有 refused 场景 transport 零调用（回归汇总）',
     assert.deepEqual(calls, [], 'refused 时一次都不许调 transport');
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ 第十一轮审查 P0-1：set_image_scale9 移出 CREATE 白名单
+//   它改的是**包内共享图片资源**（别的组件可能引用同一张图），且 exec-plan.js
+//   从不产出该 op（grep 确认只在词表里）→ 移除不影响合法计划，只拦人为篡入。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0-1: set_image_scale9 不在 CREATE 白名单 → refused 且零调用', async () => {
+  const calls = [];
+  const ep = realExec();
+  ep.steps.push({
+    step: ep.steps.length + 1, op: 'set_image_scale9',
+    args: { pkg: 'Mail', name: '背景.png', scale9grid: '10,10,10,10' }, source: { tempId: 'X' },
+  });
+  const { report } = await runExecPlan(ep, fakeTransport({ calls }));
+  assert.equal(report.status, 'refused');
+  assert.match(report.reason, /set_image_scale9/);
+  assert.match(report.reason, /不在 CREATE 白名单内/);
+  assert.deepEqual(calls, [], 'refused 时一次都不许调 transport');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ 第十一轮审查 P1：没有回读证据的"成功"叫 ok-unverified，不叫 ok
+//   （步骤都成功 ≠ 结果对；没有证据就必须让人看见"未验证"）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P1 ① verify 为空 → status:ok-unverified，advisory 明说未验证', async () => {
+  const ep = realExec();
+  ep.verify = [];
+  const { report } = await runExecPlan(ep, fakeTransport());
+  assert.equal(report.status, 'ok-unverified', '没有回读证据不许叫 ok');
+  assert.ok(Array.isArray(report.advisories));
+  assert.ok(report.advisories.some((a) => /未验证/.test(a)),
+    `advisory 必须显式写「未验证」：${JSON.stringify(report.advisories)}`);
+  assert.equal(report.summary.failed, 0);
+  assert.equal(report.summary.executed, report.summary.steps);
+});
+
+test('★ P1 ② 计划声明「无法回读验证」→ 即便 verify 通过也是 ok-unverified', async () => {
+  const ep = realExec();
+  ep.unsupported.push({
+    source: { tempId: null }, required: false,
+    reason: '词表里没有任何可用的回读命令 —— 无法回读验证，需人工核对',
+  });
+  const { report } = await runExecPlan(ep, fakeTransport());
+  assert.equal(report.status, 'ok-unverified');
+  assert.ok(report.advisories.some((a) => /未验证/.test(a)));
+});
+
+test('★ P1 ③ 回读通过 + 无能力缺失声明 → 仍是 ok（回归，别误伤）', async () => {
+  const { report } = await runExecPlan(realExec(), fakeTransport());
+  assert.equal(report.status, 'ok');
+  assert.equal(report.advisories, undefined, '正常路径不该有 advisory');
+});
+
+test('★ P1 ④ md 渲染：ok-unverified 的状态与「未验证」都要可见', async () => {
+  const ep = realExec();
+  ep.verify = [];
+  const { report } = await runExecPlan(ep, fakeTransport());
+  const md = renderExecReportMarkdown(report);
+  assert.ok(/- status: ok-unverified/.test(md), 'md 必须显示 ok-unverified');
+  assert.ok(/未验证/.test(md), 'md 必须显式说明未验证');
+});

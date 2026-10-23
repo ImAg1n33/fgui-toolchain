@@ -36,7 +36,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 
 const { runCli, CLI } = require('./run-cli');
-const { runCreateRun } = require('../../src/cli/cmd-create-run');
+const { runCreateRun, isAbsentEvidence } = require('../../src/cli/cmd-create-run');
 const { toAppError } = require('../../src/core/errors');
 const { buildCreatePlan } = require('../../src/create/plan-builder');
 const { buildExecPlan } = require('../../src/create/exec-plan');
@@ -495,6 +495,176 @@ test('⑥-c 篡改步骤塞入白名单外命令（delete_item）→ 被 Runner 
   assert.match(r.json.reason, /CREATE 白名单/);
   assert.equal(r.calls.some((c) => WRITE_OPS.has(c.op)), false,
     '★ 词表内但白名单外的命令，一个都不许到达 Bridge');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ 第十一轮审查 P0-1：目标绑定 —— 存在性检查查的是 target，写步骤必须只写给 target
+//   篡改手法：target.page=NewPage（不存在，检查通过）而 insert_text.args.name=
+//   ExistingPage（真实写入已有组件）。本工具无事务回滚 → 必须在探测之前拦下。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0-1 ① 篡改 insert_text.args.name 指向已有组件 → 退 4，零调用（连探测都不做）', async () => {
+  const f = setup('bind-name', (plan) => {
+    plan.steps.find((s) => s.op === 'insert_text').args.name = 'ExistingPage';
+  });
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+  const stepNo = realExec().steps.find((s) => s.op === 'insert_text').step;
+
+  assert.equal(r.code, 4, `绑定不符应退 4，实际 ${r.code}`);
+  assert.equal(r.json.reason, 'TARGET_BINDING_VIOLATION');
+  assert.ok(r.json.detail.includes(`step ${stepNo} 的 args.name='ExistingPage' ≠ target.page='MailPagePopup'`),
+    `错误必须点名 step 与字段：${r.json.detail}`);
+  // ★ 绑定闸门在探测之前：ping 之外零调用，写命令更不许出现
+  assert.deepEqual(opsOf(r.calls), ['ping'], '★ 绑定不符时连 read_component 探测都不许发');
+  assert.equal(r.calls.some((c) => WRITE_OPS.has(c.op)), false);
+  assert.equal(fs.existsSync(path.join(f.out, 'exec_report.json')), false, '拒绝执行不落报告');
+});
+
+test('★ P0-1 ② 第一个写步骤不是 create_component → 退 4，零调用', async () => {
+  const f = setup('bind-first', (plan) => {
+    plan.steps = plan.steps.filter((s) => s.op !== 'create_component');
+  });
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+
+  assert.equal(r.code, 4);
+  assert.equal(r.json.reason, 'TARGET_BINDING_VIOLATION');
+  assert.match(r.json.detail, /第一个写步骤必须是 create_component/);
+  assert.deepEqual(opsOf(r.calls), ['ping']);
+});
+
+test('★ P0-1 ③ verify 里塞 insert_text（写命令）→ 退 4，零调用', async () => {
+  const f = setup('bind-verify', (plan) => {
+    plan.verify.push({
+      op: 'insert_text', args: { pkg: 'Mail', name: 'MailPagePopup', child: 'x', index: 9, text: 'x' },
+    });
+  });
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+
+  assert.equal(r.code, 4);
+  assert.equal(r.json.reason, 'TARGET_BINDING_VIOLATION');
+  assert.match(r.json.detail, /verify 的 op 'insert_text' 不是只读回读命令/);
+  assert.deepEqual(opsOf(r.calls), ['ping']);
+});
+
+test('★ P0-1 ④ verify 指向别的组件 → 退 4（回读也不许跑偏）', async () => {
+  const f = setup('bind-verify-target', (plan) => {
+    plan.verify[0].args.name = 'OtherPage';
+  });
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+
+  assert.equal(r.code, 4);
+  assert.equal(r.json.reason, 'TARGET_BINDING_VIOLATION');
+  assert.match(r.json.detail, /verify 的 args\.name='OtherPage' ≠ target\.page='MailPagePopup'/);
+  assert.deepEqual(opsOf(r.calls), ['ping']);
+});
+
+test('★ P0-1 ⑤ 合法清单照常执行（回归：绑定闸门不误伤）', async () => {
+  const f = setup('bind-ok');
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+  assert.equal(r.code, 0, `合法清单不该被绑定闸门拦：${JSON.stringify(r.json).slice(0, 300)}`);
+});
+
+test('★ P0-1 ⑥ 清单里出现 set_image_scale9 → 被 Runner 白名单拦下，退 5', async () => {
+  const f = setup('bind-scale9', (plan) => {
+    plan.steps.push({
+      step: plan.steps.length + 1, op: 'set_image_scale9',
+      args: { pkg: 'Mail', name: '背景.png', scale9grid: '10,10,10,10' }, source: { tempId: 'X' },
+    });
+  });
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+
+  assert.equal(r.code, 5, `不在白名单应退 5，实际 ${r.code}`);
+  assert.equal(r.json.status, 'refused');
+  assert.match(r.json.reason, /set_image_scale9/);
+  assert.match(r.json.reason, /不在 CREATE 白名单内/);
+  // 绑定闸门不管白名单外的 op（它们到不了 Bridge）；探测照常，Runner 拦在门前
+  assert.deepEqual(opsOf(r.calls), ['ping', 'read_component']);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ 第十一轮审查 P0-3：只有**明确**的「组件不存在」才算不存在证据
+//   包不存在 / 读失败 / 插件内部异常 → 存在性未知 → 退 4（fail-closed）。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P0-3 ① probe 返回 "component not found" → 判不存在，照常执行退 0', async () => {
+  const f = setup('absent-en');
+  const script = happyScript();
+  script.read_component = [{ ok: false, error: 'component not found: Mail/MailPagePopup' }, READ_PRESENT];
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script });
+
+  assert.equal(r.code, 0, `明确不存在应放行：${JSON.stringify(r.json).slice(0, 300)}`);
+  assert.equal(r.json.status, 'ok');
+  assert.match(r.json.targetExistence.note, /明确匹配「组件不存在」判据/);
+  assert.ok(!/已确认不存在/.test(r.json.targetExistence.note),
+    '★ 过度措辞「已确认不存在」不许再现（模式匹配≠铁证）');
+});
+
+test('★ P0-3 ② probe 返回 "package not found" → 存在性未知，退 4', async () => {
+  const f = setup('absent-pkg');
+  const script = happyScript();
+  script.read_component = { ok: false, error: 'package not found: Mail' };
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script });
+
+  assert.equal(r.code, 4, `包不存在不是组件不存在，必须退 4，实际 ${r.code}`);
+  assert.equal(r.json.reason, 'TARGET_EXISTENCE_UNVERIFIED');
+  assert.match(r.json.detail, /无法确认/);
+  assert.deepEqual(opsOf(r.calls), ['ping', 'read_component'], '★ 未知就停，不许进 Runner');
+});
+
+test('★ P0-3 ③ probe 返回 "读取失败" → 存在性未知，退 4', async () => {
+  const f = setup('absent-readfail');
+  const script = happyScript();
+  script.read_component = { ok: false, error: '读取失败：组件文件损坏' };
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script });
+
+  assert.equal(r.code, 4);
+  assert.equal(r.json.reason, 'TARGET_EXISTENCE_UNVERIFIED');
+  assert.deepEqual(opsOf(r.calls), ['ping', 'read_component']);
+});
+
+test('★ P0-3 ④ isAbsentEvidence 判据表（纯函数直测，防模式表被改松）', () => {
+  // 明确「组件不存在」→ true
+  for (const e of [
+    'component not found', 'Component "X" does not exist', "component doesn't exist",
+    'no such component', '组件不存在', 'not found', '组件不存在：Mail/MailPagePopup',
+  ]) {
+    assert.equal(isAbsentEvidence(e), true, `应判不存在: ${e}`);
+  }
+  // 不是「组件不存在」→ false（含包/读取/异常字样，或压根不匹配）
+  for (const e of [
+    'package not found', 'the package does not exist', '包 Mail 不存在', '读取失败',
+    '组件文件损坏', '插件内部异常', 'internal error occurred', 'timeout', '', null, undefined,
+  ]) {
+    assert.equal(isAbsentEvidence(e), false, `不得判不存在: ${JSON.stringify(e)}`);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★ 第十一轮审查 P1：没有回读证据的成功 → ok-unverified（退 0 但 stdout 可区分）
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★ P1 ① verify 为空的清单 → status:ok-unverified，退 0，stdout 明示未验证', async () => {
+  const f = setup('unverified', (plan) => { plan.verify = []; });
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+
+  assert.equal(r.code, 0, `未验证的成功也退 0，实际 ${r.code}`);
+  assert.equal(r.json.status, 'ok-unverified');
+  assert.equal(r.json.verified, false, '★ stdout 必须能区分「已验证/未验证」');
+  assert.equal(r.json.ok, true);
+
+  const report = JSON.parse(fs.readFileSync(path.join(f.out, 'exec_report.json'), 'utf8'));
+  assert.equal(report.status, 'ok-unverified');
+  assert.ok((report.advisories || []).some((a) => /未验证/.test(a)), '报告必须写未验证');
+  const md = fs.readFileSync(path.join(f.out, 'exec_report.md'), 'utf8');
+  assert.ok(/- status: ok-unverified/.test(md) && /未验证/.test(md), 'md 也要可见');
+});
+
+test('★ P1 ② 有回读且通过 → 仍是 ok、verified:true（回归）', async () => {
+  const f = setup('verified');
+  const r = await runInProcess({ args: stdArgs(f, { confirm: true }), script: happyScript() });
+  assert.equal(r.code, 0);
+  assert.equal(r.json.status, 'ok');
+  assert.equal(r.json.verified, true);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

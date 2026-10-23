@@ -16,6 +16,13 @@
  *      （不做"尽力继续"—— 半截组件比不做更难清理）。
  *   3. **确定性**：默认**不写时间戳、不写耗时**（`ms` 仅在 `opts.timing===true` 时输出），
  *      同输入 + 同 transport 两次运行报告**逐字节一致**。
+ *
+ * ★ report.status 取值（P1：没有回读证据的成功不叫 ok）★
+ *   refused        门禁未过 / 计划不可执行（**一次都不调 transport**）
+ *   failed         第一条步骤失败即停，后续 skipped
+ *   verify-failed  回读不通过（onMismatch:'fail' → 命令 ok 也不算成功）
+ *   ok             步骤全成 + 回读全过
+ *   ok-unverified  步骤全成但**结果未验证**（无 verify 条目 / 计划声明无法回读验证）
  * ════════════════════════════════════════════════════════════════════════════
  */
 
@@ -38,6 +45,12 @@ const REPORT_VERSION = '0.1';
  *   资源的能力**（`delete_item` / `remove_object` / `publish` / `screenshot` …）。
  *   CREATE 的目标是"建一个页面"，它**不需要**任何删除/发布/写磁盘副作用命令。
  *   故在词表之外再加一层**能力最小集**：默认只放行建页面所需的命令 + 回读命令。
+ *
+ * ★ 第十一轮审查 P0-1：移除 `set_image_scale9` ★
+ *   它改的是**包内共享图片资源**的九宫格 —— 同一个图片被别的组件引用时，
+ *   改它等于偷偷改了无关组件的渲染。而 `exec-plan.js` **从不产出**该 op
+ *   （已 grep 确认：只在词表里，没有任何 emit 调用）→ 移除不影响任何合法计划，
+ *   只让人为篡进来的该命令被最终门禁拦下（refused）。
  */
 const CREATE_ALLOWED_OPS = Object.freeze([
   'create_component', // 建页面/组件容器
@@ -45,7 +58,6 @@ const CREATE_ALLOWED_OPS = Object.freeze([
   'insert_text', // 插文本
   'insert_list', // 插列表
   'insert_loader', // 插装载器
-  'set_image_scale9', // 库内图片标九宫格（跨包底框需要）
   'save_all', // 落盘
   // 回读（不写盘）：验证"做对了"而不是"命令 ok"
   'read_component',
@@ -381,12 +393,26 @@ async function runExecPlan(execPlan, transport, opts = {}) {
   report.verify = verifyResults;
   report.summary.verifyDiffs = verifyResults.reduce((n, r) => n + (r.diffs ? r.diffs.length : 0), 0);
 
+  // ── ④ 定 status：没有回读证据的"成功"不许叫 ok（第十一轮审查 P1）──
+  //
+  //   ok              步骤全成 + 回读全过（有证据的成功）
+  //   ok-unverified   步骤全成，但**结果未验证**（无 verify 条目，或计划自己
+  //                   声明了「无法回读验证」的能力缺失）→ 退 0 但必须让人看见
+  //   verify-failed   回读不通过
+  //   failed          步骤失败即停
+  //   refused         门禁未过（一次都没调 transport）
+  const readbackMissing = (Array.isArray(execPlan.unsupported) ? execPlan.unsupported : [])
+    .some((u) => u && u.required === false && /无法回读/.test(String(u.reason || '')));
+
   if (!verifyList.length) {
-    report.status = 'ok';
-    report.advisories = ['execPlan 没有 verify 条目（回读能力缺失）→ 未做结果校验，需人工核对'];
+    report.status = 'ok-unverified';
+    report.advisories = ['execPlan 没有 verify 条目（回读能力缺失）→ 结果**未验证**，需人工核对'];
   } else if (!verifyOk) {
     // ★ onMismatch:'fail' → 命令 ok 也不能算成功 ★
     report.status = 'verify-failed';
+  } else if (readbackMissing) {
+    report.status = 'ok-unverified';
+    report.advisories = ['回读能力缺失（计划声明无法回读验证）→ 结果**未验证**，需人工核对'];
   } else {
     report.status = 'ok';
   }

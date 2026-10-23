@@ -12,12 +12,26 @@
  *   2. **失败即停 ≠ 自动回滚**：本工具**没有事务回滚**。因此执行前必须**正向证明**
  *      目标组件不存在（用 `read_component` 查），已存在 → 拒绝执行（退 4）。
  *
+ * ★ 第十一轮审查加固（三道闸门，按序）★
+ *   3.1 **目标绑定**（P0-1，`checkTargetBinding`）：存在性检查只证明 target 不存在，
+ *       但 Runner 执行的是 `steps[*].args` —— 篡改清单即可写成别的组件。故确认
+ *       执行时先校验：第一个写步骤必须是 create_component 且 pkg/name == target；
+ *       其余写步骤 pkg/name 必须绑定 target；verify 只许只读回读命令。不符 → 退 4
+ *       且**零调用**（连探测都不发）。
+ *   3.2 **存在性探测**（只读 read_component）：已存在 → 退 4；探测失败（没打通）→ 退 4。
+ *   3.3 **严格不存在判据**（P0-3，`isAbsentEvidence`）：插件回 ok:false 也**不等于**
+ *       「组件不存在」—— 可能是包不存在/读失败/内部异常。只有错误明确匹配
+ *       「not found / does not exist / 不存在」等模式且不含包/读取/异常字样，
+ *       才作为不存在证据；否则按未知处理，退 4。
+ *
  * ★ 不做的事 ★
  *   · **不实现 `publish` / 删除类入口**（Runner 自带白名单 `CREATE_ALLOWED_OPS` 已挡，
  *     本 CLI 也不提供任何旁路）。
  *   · **不加重试**：失败即停，与朋友 SKILL.md「编辑命令串行、上一条成功再发下一条」一致。
  *   · **不做多实例路由**：只接受显式 `--bridge-url`（官方 `instances.mjs` 缺失，
  *     路由优先级未确认 —— 猜了就是错）。
+ *   · **不外连**：`--bridge-url` 只允许本机回环（P0-2，见 bridge-http.js 的
+ *     `assertLoopbackUrl`，构造时强校验，拒绝发生在联网之前）。
  *
  * ★ 可测缝 ★
  *   逻辑在 `runCreateRun(args, deps)`，`deps.transport` 可注入（契约同 Runner）；
@@ -25,10 +39,12 @@
  *   的前提下真跑整条命令逻辑。生产路径永远走默认 HTTP transport。
  *
  * 退出码：
- *   0  干跑成功 / 执行成功
+ *   0  干跑成功 / 执行成功（report.status 为 `ok` 或 `ok-unverified`，stdout 用
+ *      `status`/`verified` 区分「已验证的成功」与「未验证的成功」）
  *   2  参数错误 / 文件不存在
- *   4  NEEDS_HUMAN：运行时自检不过、目标组件已存在、无法确认目标是否存在
- *   5  Runner 报告 status !== 'ok'（执行/校验失败）
+ *   4  NEEDS_HUMAN：运行时自检不过、目标绑定不符、目标组件已存在、
+ *      探测失败或无法确认为「组件不存在」
+ *   5  Runner 报告 status 为 failed / verify-failed / refused
  *
  * 日志走 stderr、数据走 stdout（与全仓约定一致）。
  */
@@ -92,6 +108,129 @@ function samePath(a, b) {
 }
 
 /**
+ * 写命令集合（与 Runner `CREATE_ALLOWED_OPS` 的写侧对齐）。
+ *
+ * 只有这些命令真的会**写给某个组件**，所以才需要（也只需要）做目标绑定校验。
+ * 白名单外的命令根本到不了 Bridge（Runner 最终门禁会 refused），
+ * 在这里重复判断只会让错误信息指错地方。
+ * @type {Set<string>}
+ */
+const BINDING_WRITE_OPS = Object.freeze(new Set([
+  'create_component', 'insert_object', 'insert_text', 'insert_list', 'insert_loader', 'save_all',
+]));
+
+/** 只读回读命令（verify 只允许这些，且必须指向 target）。 @type {Set<string>} */
+const READBACK_OPS = Object.freeze(new Set(['read_component', 'list_children', 'list_items']));
+
+/**
+ * ★ P0-1 目标绑定校验：存在性检查查的是 target，写步骤就必须**只**写给 target ★
+ *
+ * 背景（第十一轮审查）：原实现只查 `target.pkg + target.page` 是否存在，但 Runner
+ * 执行的是 `steps[*].args` —— 篡改清单即可让 `target.page=NewPage`（不存在，检查通过）
+ * 而 `insert_text.args.name=ExistingPage`（真实写入已有组件）。本工具**没有事务回滚**，
+ * 这种写入会直接污染工程，必须在探测之前拦下。
+ *
+ * 四条规则：
+ *   1. 第一个写步骤必须是 `create_component`，且 `args.pkg/name` 等于 target；
+ *   2. 其余写步骤的 `args.pkg/name` 必须等于 target（`save_all` 不带视为绑定）；
+ *   3. `verify` 只允许只读回读命令（read_component/list_children/list_items）且指向 target；
+ *   4. 任一不符 → 调用方退 4 且**零调用**（连探测都不做）。
+ *
+ * @param {Object} execPlan create_exec.json 的内容
+ * @returns {{ok:boolean, reason?:string}}
+ */
+function checkTargetBinding(execPlan) {
+  const target = (execPlan && execPlan.target) || {};
+  const pkg = target.pkg;
+  const page = target.page;
+  if (!pkg || !page) {
+    return { ok: false, reason: 'create_exec.json 的 target 缺少 pkg/page，无法校验目标绑定' };
+  }
+  const steps = Array.isArray(execPlan.steps) ? execPlan.steps : [];
+  const writeSteps = steps.filter((s) => s && BINDING_WRITE_OPS.has(s.op));
+
+  // ① 第一个写步骤必须是 create_component 且指向 target
+  const first = writeSteps[0];
+  if (!first) {
+    return {
+      ok: false,
+      reason: '清单里没有任何写步骤（create_component/insert_*/save_all 皆无）'
+        + ' —— 无法证明本次执行只会创建 target',
+    };
+  }
+  if (first.op !== 'create_component') {
+    return {
+      ok: false,
+      reason: `第一个写步骤必须是 create_component（实际是 step ${first.step} 的 ${first.op}）`
+        + ' —— 无法证明后续写入只作用于 target',
+    };
+  }
+  const fa = first.args || {};
+  if (fa.pkg !== pkg || fa.name !== page) {
+    return {
+      ok: false,
+      reason: `step ${first.step} 的 args.pkg='${fa.pkg}'/args.name='${fa.name}'`
+        + ` ≠ target.pkg='${pkg}'/target.page='${page}'`,
+    };
+  }
+
+  // ② 其余写步骤的 pkg/name 必须绑定 target（字段缺省视为绑定，如 save_all 的 {}）
+  for (const s of writeSteps) {
+    const a = s.args || {};
+    if (a.pkg !== undefined && a.pkg !== null && a.pkg !== pkg) {
+      return { ok: false, reason: `step ${s.step} 的 args.pkg='${a.pkg}' ≠ target.pkg='${pkg}'` };
+    }
+    if (a.name !== undefined && a.name !== null && a.name !== page) {
+      return { ok: false, reason: `step ${s.step} 的 args.name='${a.name}' ≠ target.page='${page}'` };
+    }
+  }
+
+  // ③ verify 只允许只读回读命令，且指向 target
+  for (const v of Array.isArray(execPlan.verify) ? execPlan.verify : []) {
+    if (!v || !READBACK_OPS.has(v.op)) {
+      return {
+        ok: false,
+        reason: `verify 的 op '${v && v.op ? v.op : '(缺失)'}' 不是只读回读命令`
+          + `（${[...READBACK_OPS].join(' / ')}）—— 回读阶段不许出现写命令`,
+      };
+    }
+    const a = v.args || {};
+    if (a.pkg !== undefined && a.pkg !== null && a.pkg !== pkg) {
+      return { ok: false, reason: `verify 的 args.pkg='${a.pkg}' ≠ target.pkg='${pkg}'` };
+    }
+    if (a.name !== undefined && a.name !== null && a.name !== page) {
+      return { ok: false, reason: `verify 的 args.name='${a.name}' ≠ target.page='${page}'` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * ★ P0-3「组件不存在」的严格判据 ★
+ *
+ * 原实现把探测的任何 `ok:false`（非传输错误）都当作「组件不存在」—— 但
+ * `read_component` 也可能因**包不存在 / 读文件失败 / 插件内部异常**返回 ok:false。
+ * 把业务错误读成"不存在"，下一步就是往已存在组件上写（无回滚）。
+ *
+ * 只有错误信息**明确**表示"没有这个组件"时才算不存在证据；其余一律按
+ * 「存在性未知」处理（fail-closed，退 4）。插件真实措辞未经源码确认
+ * （instances.mjs 缺失），故判据从保守方向设计：命中下列不存在模式、
+ * 且不含包/读取/异常类字样，才放行。
+ *
+ * @param {*} error 插件返回的 error 字段
+ * @returns {boolean} true = 明确是「组件不存在」
+ */
+function isAbsentEvidence(error) {
+  const msg = String(error || '');
+  if (!msg) return false;
+  const ABSENT_RE = [/not\s*found/i, /does\s*not\s*exist/i, /doesn'?t\s+exist/i, /no\s+such/i, /不存在/];
+  // 含这些字样 → 明确**不是**「组件不存在」（如 package not found / 读取失败 / 内部异常）
+  const NOT_ABSENT_RE = [/package/i, /包/, /pkg/i, /资源库/, /读取|read\s*fail|failed\s+to\s+read/i, /internal|异常|occurred/i];
+  if (NOT_ABSENT_RE.some((re) => re.test(msg))) return false;
+  return ABSENT_RE.some((re) => re.test(msg));
+}
+
+/**
  * create-run 主体（**可注入 transport 的可测形态**）。
  *
  * ★ 为什么要有这个缝 ★
@@ -102,7 +241,8 @@ function samePath(a, b) {
  *
  * @param {Object} [args]
  * @param {string|null} [args.exec] create_exec.json 路径（相对 rootDir 或绝对）
- * @param {string|null} [args.bridgeUrl] 显式 Bridge URL（生产必填；注入 transport 时仅为占位）
+ * @param {string|null} [args.bridgeUrl] 显式 Bridge URL（生产必填；注入 transport 时仅为占位；
+ *   只允许本机回环，见 P0-2 `assertLoopbackUrl`）
  * @param {string|null} [args.project] 期望的工程路径（--project）
  * @param {boolean} [args.confirm=false] 是否真正执行（false = 只干跑）
  * @param {string|null} [args.out] 产物目录（相对 rootDir 或绝对；缺省 'out'）
@@ -198,12 +338,29 @@ async function runCreateRun(args = {}, deps = {}) {
     return 0;
   }
 
-  // ── ③ 确认执行：先正向证明目标组件不存在（无事务回滚，必须先挡）──
-  const componentName = target.page;
-  if (!componentName || !target.pkg) {
-    throw new AppError(CODES.BAD_ARGUMENT,
-      'create_exec.json 的 target 缺少 pkg/page，无法校验目标组件是否已存在');
+  // ── ③ 确认执行：三道闸门，顺序即优先级 ──
+  //
+  //   3.1 目标绑定（P0-1）：写步骤必须只写给 target。放在探测**之前** ——
+  //       绑定不符时连 read_component 都不发（fail-closed，零调用）。
+  const binding = checkTargetBinding(execPlan);
+  if (!binding.ok) {
+    if (logger) logger.error('目标绑定校验未通过，拒绝执行', { reason: binding.reason });
+    emit({
+      command: 'create-run',
+      ok: false,
+      dryRun: false,
+      exitCodeMeaning: 'NEEDS_HUMAN',
+      reason: 'TARGET_BINDING_VIOLATION',
+      detail: `${binding.reason}。存在性检查只能证明 target 不存在；若写步骤指向别的组件，`
+        + '就会在**没有事务回滚**的情况下污染已有组件 —— 故拒绝执行。',
+      nextAction: '修正 create_exec.json：写步骤的 pkg/name 必须与 target 一致，'
+        + '第一个写步骤必须是 create_component，verify 只许只读回读命令。',
+    });
+    return EXIT.NEEDS_HUMAN;
   }
+
+  //   3.2 目标存在性探测（只读 read_component，不写任何东西）
+  const componentName = target.page;
   const probe = await transport.send('read_component', { pkg: target.pkg, name: componentName });
   if (probe.ok) {
     // 读到了 → 组件已存在
@@ -238,17 +395,41 @@ async function runCreateRun(args = {}, deps = {}) {
     });
     return EXIT.NEEDS_HUMAN;
   }
-  // 到这里：Bridge 通、插件明确回 ok:false（即查不到该组件）→ 可以建
-  const existenceNote = `已用 read_component 确认目标组件 '${componentName}' 不存在`
-    + `（插件返回 error：${probe.error || '(无)'}）`;
+  //   P0-3：插件回了 ok:false，但错误**无法确认**是「组件不存在」
+  //   （可能是包不存在 / 读失败 / 插件内部异常）→ 按未知处理，绝不当作不存在
+  if (!isAbsentEvidence(probe.error)) {
+    if (logger) logger.error('探测返回 ok:false 但无法确认为「组件不存在」，按未知拒绝执行', {
+      error: probe.error,
+    });
+    emit({
+      command: 'create-run',
+      ok: false,
+      dryRun: false,
+      exitCodeMeaning: 'NEEDS_HUMAN',
+      reason: 'TARGET_EXISTENCE_UNVERIFIED',
+      detail: `探测返回 ok:false 但无法确认为「组件不存在」（error: ${probe.error}）`
+        + ' —— 可能是包不存在/读取失败/插件内部异常。按未知处理，拒绝执行（无事务回滚）。',
+      nextAction: '人工确认该组件确实不存在后再执行；若判据需要扩充，'
+        + '改 cmd-create-run.js 的 isAbsentEvidence 并同步其单测。',
+    });
+    return EXIT.NEEDS_HUMAN;
+  }
+  //  3.3 到这里：Bridge 通、写步骤绑定 target、插件**明确**回「组件不存在」→ 可以建
+  const existenceNote = `read_component 返回 ok:false 且错误明确匹配「组件不存在」判据`
+    + `（${probe.error}）—— 目标不存在，允许创建`;
 
   // ── ④ 交给 Runner（它有自己的最终门禁：白名单 / unsupported / invalidSteps）──
   const { report } = await runExecPlan(execPlan, transport, { timing: false });
   const outputs = writeExecReport(outDir, report);
 
+  // ★ P1：ok-unverified（步骤全成但结果未验证）同样退 0，但 stdout 必须能区分 ★
+  const succeeded = report.status === 'ok' || report.status === 'ok-unverified';
+  const verified = report.status === 'ok';
+
   if (logger) {
-    logger.info('执行完成（失败即停，无重试、无回滚）', {
+    logger.info(succeeded ? '执行完成（失败即停，无重试、无回滚）' : '执行未完成（见报告）', {
       status: report.status,
+      verified,
       executed: report.summary ? report.summary.executed : 0,
       failed: report.summary ? report.summary.failed : 0,
     });
@@ -256,9 +437,10 @@ async function runCreateRun(args = {}, deps = {}) {
 
   emit({
     command: 'create-run',
-    ok: report.status === 'ok',
+    ok: succeeded,
     dryRun: false,
     status: report.status,
+    verified,
     preflight: { ok: true, ping: check.ping },
     targetExistence: { proven: 'absent', how: 'read_component', note: existenceNote },
     outputs: {
@@ -270,7 +452,7 @@ async function runCreateRun(args = {}, deps = {}) {
     reason: report.reason || null,
   });
 
-  return report.status === 'ok' ? 0 : EXIT.ROLLED_BACK;
+  return succeeded ? 0 : EXIT.ROLLED_BACK;
 }
 
 /**
@@ -293,4 +475,6 @@ async function run(ctx, deps = {}) {
   }, { ...deps, logger });
 }
 
-module.exports = { run, runCreateRun, preflight, samePath };
+module.exports = {
+  run, runCreateRun, preflight, samePath, checkTargetBinding, isAbsentEvidence,
+};
